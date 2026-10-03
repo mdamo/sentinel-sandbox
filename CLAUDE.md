@@ -48,6 +48,8 @@ agent → Action (typed intent) → Broker.submit()
 | `sentinel/serve.py` | Stdlib HTTP front end on the Linux host. |
 | `swarm/catalog.py` | Shared six-agent roster and six tool names. |
 | `swarm/ai_agents.py` | Model proposal interface, offline backend, and mediated tools. |
+| `swarm/nemotron.py` | Stdlib NVIDIA HTTPS proposal transport, repository `.env` loading, strict JSON parsing. |
+| `swarm/live_demo.py` | Fetch and validate all six live proposals before submitting any abstract actions. |
 | `swarm/scenarios.py` | Abstract benign + misbehaving agent behaviours. |
 | `swarm/agent_client.py` | In-guest agent that POSTs actions to the sentinel. |
 | `run_demo.py` | End-to-end demo with audit log + verdict table. |
@@ -113,6 +115,34 @@ sudo KERNEL_IMAGE=/path/to/vmlinux ROOTFS_IMAGE=/path/to/agent.ext4 deploy/micro
 
 **Always run both `run_demo.py` and `test_sentinel.py` after a change** and
 confirm the counts above before claiming it works.
+
+## Live NVIDIA proposal backend
+
+- Run `python3.13 -m swarm.live_demo` from `sentinel-poc`; `--model` and
+  `--task` override the model and task. This is a local process, not a microVM.
+- Default: `nvidia/nemotron-3.5-lightning-30b-a3b`. The old
+  `nvidia/nemotron-nano-3-30b-a3b` returned 404; the corrected older ID
+  `nvidia/nemotron-3-nano-30b-a3b` returned 410 with an end-of-life date of
+  September 1, 2026. Verify current availability before changing model IDs.
+- Settings load from the repository-root `.env` beside this file:
+  `NVIDIA_API_KEY`, `NVIDIA_MODEL`, `NVIDIA_BASE_URL`, and `LOG_LEVEL`.
+  Existing environment variables take precedence. Never print the API key.
+- Base URL defaults to `https://integrate.api.nvidia.com/v1`; the client
+  appends `/chat/completions` and requires HTTPS and a Nemotron model prefix.
+- Requests use JSON response mode, disabled thinking, temperature zero,
+  a 2048-token output limit, a 60-second timeout, and no retries or fallback.
+- Proposals contain one to six recognized calls with string-valued arguments.
+  `run_python` takes empty arguments; proposals never execute Python code.
+- Preserve batch validation: transport errors, incomplete responses, and
+  malformed proposals must stop the demo before any broker submission.
+- Live availability and model formatting require a separate live check; the
+  19 offline tests and local demo do not establish live-provider success.
+
+Verification on October 3, 2026: all 19 offline tests and the local demo
+passed. The replacement accepted live requests, but checks encountered an
+incomplete response, malformed JSON, and provider timeouts. The final live
+run timed out before submitting actions; a successful six-agent live run
+has not yet been verified.
 
 ## Known limits (already documented in README — keep them honest)
 
