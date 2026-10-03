@@ -34,7 +34,7 @@ def default_broker() -> Broker:
     monitor = Monitor(
         Budget(5000, 20, 2), Budget(50000, 100, 3),
         response=ResponsePolicy.strict(),
-        on_alert=lambda a: print(a.line(), flush=True),
+        on_alert=lambda a: print(f"[sentinel | host | alert] {a.line()}", flush=True),
     )
     return Broker(policy, monitor)
 
@@ -59,9 +59,12 @@ class Handler(BaseHTTPRequestHandler):
             decision = BROKER.submit(action)
             out = {"allow": decision.allow, "rule": decision.rule,
                    "reason": decision.reason}
-            print(BROKER.audit[-1].line(), flush=True)
+            print(f"[sentinel | host | decision] peer={self.client_address[0]} "
+                  f"{BROKER.audit[-1].line()}", flush=True)
         except Exception as exc:  # fail closed
             out = {"allow": False, "rule": "fail-closed", "reason": repr(exc)}
+            print(f"[sentinel | host | decision] peer={self.client_address[0]} "
+                  "DENY rule=fail-closed", flush=True)
         payload = json.dumps(out).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -76,7 +79,8 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     host, _, port = os.environ.get("SENTINEL_BIND", "0.0.0.0:8085").partition(":")
     srv = ThreadingHTTPServer((host, int(port)), Handler)
-    print(f"sentinel listening on {host}:{port}", flush=True)
+    print(f"[sentinel | host] ready endpoint=http://{host}:{port}/submit "
+          f"pid={os.getpid()}; evaluates agent actions on the host", flush=True)
     srv.serve_forever()
 
 

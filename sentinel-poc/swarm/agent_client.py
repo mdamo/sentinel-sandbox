@@ -23,6 +23,10 @@ def submit(agent_id: str, type_: str, **params) -> dict:
 
 
 def main() -> None:
+    location = os.environ.get("AGENT_RUNTIME", "local process")
+    prefix = f"[agent-1 | {location}]"
+    print(f"{prefix} starting pid={os.getpid()} uid={os.getuid()} "
+          f"sentinel={BROKER}", flush=True)
     time.sleep(1.0)  # let the sentinel come up
     me = "agent-1"
     attempts = [
@@ -33,14 +37,16 @@ def main() -> None:
          False, "egress-allowlist"),
     ]
     for type_, params, expected_allow, expected_rule in attempts:
+        print(f"{prefix} submitting action={type_} to host sentinel", flush=True)
         d = submit(me, type_, **params)
         verb = "ALLOW" if d["allow"] else "DENY "
-        print(f"[{verb}] {type_:<10} {params} :: {d['rule']}", flush=True)
+        print(f"{prefix} sentinel decision=[{verb}] {type_:<10} {params} :: {d['rule']}", flush=True)
         if d["allow"] is not expected_allow or d["rule"] != expected_rule:
             raise RuntimeError(
                 f"unexpected sentinel decision: {d!r}; "
                 f"expected allow={expected_allow}, rule={expected_rule}"
             )
+    print(f"{prefix} completed; all three sentinel decisions matched expectations", flush=True)
 
 
 if __name__ == "__main__":

@@ -71,9 +71,12 @@ def main() -> int:
     print("=" * 78)
     print("DETERMINISTIC SENTINEL — swarm containment PoC")
     print("=" * 78)
+    print("[demo | local process] microVM=not started; agents and sentinel run in this Python process")
+    print("[sentinel | local process] policy, monitor and broker ready")
 
     verdicts = []
     for name, steps in plan:
+        print(f"[agents | local process] running scenario={name}")
         results = scenarios.run_scenario(broker, steps)
         ok = all(allowed == step.expect_allow for step, allowed in results)
         verdicts.append((name, ok))

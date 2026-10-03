@@ -11,6 +11,7 @@ sentinel_pid=
 workdir=
 
 cleanup() {
+    echo '[launcher | host] cleaning up sentinel process, guest TAP and firewall'
     [[ -z $sentinel_pid ]] || { kill "$sentinel_pid" 2>/dev/null || true; wait "$sentinel_pid" 2>/dev/null || true; }
     nft delete table inet "$table" 2>/dev/null || true
     ip link delete "$tap" 2>/dev/null || true
@@ -41,6 +42,7 @@ kernel=$(realpath "$kernel")
 rootfs=$(realpath "$rootfs")
 workdir=$(mktemp -d)
 trap cleanup EXIT INT TERM
+echo "[microVM | host] preparing Firecracker kernel=$kernel rootfs=$rootfs vcpus=1 memory=256MiB"
 
 ip tuntap add dev "$tap" mode tap
 ip addr add 172.16.0.1/30 dev "$tap"
@@ -54,10 +56,12 @@ nft 'add chain inet sentinel_poc_vm forward { type filter hook forward priority 
 nft add rule inet "$table" input iifname "$tap" ip saddr 172.16.0.2 ip daddr 172.16.0.1 tcp dport 8085 accept
 nft add rule inet "$table" input iifname "$tap" drop
 nft add rule inet "$table" forward iifname "$tap" drop
+echo "[network | host] tap=$tap host=172.16.0.1 guest=172.16.0.2; guest access limited to sentinel TCP/8085"
 
 cd "$project_dir"
 SENTINEL_BIND=172.16.0.1:8085 python3.13 -m sentinel.serve &
 sentinel_pid=$!
+echo "[sentinel | host] launched pid=$sentinel_pid; waiting for service ready log"
 
 python3.13 - "$kernel" "$rootfs" "$tap" "$workdir/vm.json" <<'PY'
 import json
@@ -86,5 +90,5 @@ with open(output, "w", encoding="utf-8") as file:
     json.dump(config, file)
 PY
 
-echo 'Starting Firecracker microVM; sentinel is bound to 172.16.0.1:8085.'
+echo '[microVM | host] starting Firecracker; guest boot and agent logs follow on serial console'
 firecracker --no-api --config-file "$workdir/vm.json"
