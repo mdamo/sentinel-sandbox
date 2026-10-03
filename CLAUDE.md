@@ -50,7 +50,7 @@ agent → Action (typed intent) → Broker.submit()
 | `swarm/agent_client.py` | In-guest agent that POSTs actions to the sentinel. |
 | `run_demo.py` | End-to-end demo with audit log + verdict table. |
 | `test_sentinel.py` | One assertion per pattern. 10 tests. |
-| `deploy/microvm/` | Firecracker guest builder and Linux host launcher; no Docker runtime. |
+| `deploy/microvm/` | Firecracker guest builder, Linux host launcher, and boot integration test; no Docker runtime. |
 
 ## Invariants — must stay true after any change
 
@@ -93,6 +93,7 @@ agent → Action (typed intent) → Broker.submit()
 ## How to run / verify
 
 ```bash
+cd sentinel-poc
 python3.13 run_demo.py    # expect: ALL SCENARIOS BEHAVED AS EXPECTED, 7 denied,
                           #         audit chain verifies: True, quarantine demo
 python3.13 test_sentinel.py # expect: 15/15 tests passed   (pytest also works)
@@ -104,6 +105,7 @@ BROKER_URL=http://127.0.0.1:8085/submit python3.13 -m swarm.agent_client
 # microVM (requires a Linux KVM host, Firecracker, guest kernel, and rootfs):
 sudo deploy/microvm/build-rootfs.sh /path/to/agent.ext4
 sudo KERNEL_IMAGE=/path/to/vmlinux ROOTFS_IMAGE=/path/to/agent.ext4 deploy/microvm/run.sh
+sudo KERNEL_IMAGE=/path/to/vmlinux ROOTFS_IMAGE=/path/to/agent.ext4 deploy/microvm/test-boot.sh
 ```
 
 **Always run both `run_demo.py` and `test_sentinel.py` after a change** and

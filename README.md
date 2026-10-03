@@ -1,5 +1,5 @@
 # Deterministic Sentinel — AI-swarm containment PoC
-Repo that creates a deterministic sentinel for a propabilistic ai swarms
+Repo that creates a deterministic sentinel for probabilistic AI swarms.
 
 A proof of concept for the idea: **put a guard on the sandbox.** Today most
 agent sandboxes are a wall with no sentinel. Here the agents run in a
@@ -17,6 +17,40 @@ sentinel adds stateful, swarm-aware checks on top of the allowlist.
 > network effects and contain no exploit. The microVM launcher configures a
 > local TAP/firewall, and the agent sends action records to the host sentinel.
 > The "attacks" remain abstract action records, not working attack code.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Guest["Firecracker microVM — untrusted cell"]
+        Agent["Agent client<br/>read-only guest rootfs<br/>172.16.0.2"]
+    end
+    subgraph Host["Linux/KVM host — trusted side"]
+        TAP["TAP link<br/>172.16.0.1 ↔ 172.16.0.2"]
+        FW["nftables<br/>only port 8085 allowed"]
+        API["Sentinel HTTP service"]
+        Broker["Broker"]
+        Policy["Stateless policy"]
+        Monitor["Stateful monitor"]
+        Audit["In-memory hash-chained audit"]
+        Logs["stdout: decisions and alerts"]
+    end
+    Agent -- "POST structured Action" --> TAP --> FW --> API --> Broker
+    Broker --> Policy --> Monitor --> Broker
+    Broker --> Audit --> Logs
+    Broker -- "allow / deny + rule" --> API --> Agent
+```
+
+The guest has one network interface and no default route. The host firewall
+drops guest traffic except requests to the sentinel. The broker first applies
+the per-action policy, then the stateful monitor, and returns a named rule with
+every decision. An `allow` is only a decision: this PoC has no trusted adapter
+that performs the requested file, tool, DNS, or outbound network effect.
+
+The sentinel prints audited decisions and escalation alerts to stdout. The
+audit chain lives in memory and is lost when the process exits. The boot test
+captures host and guest console output in a temporary file, prints it on
+failure, and deletes it on exit; there is no persistent log store yet.
 
 ## Layers
 
@@ -57,14 +91,15 @@ the demo it prints `!! ALERT [...]`. Two presets: `ResponsePolicy.preserve_origi
 (taint/canary kill the agent) and `ResponsePolicy.strict()` (a confirmed leak
 quarantines the cell).
 
-The audit log is **hash-chained** (`AuditLog`): each entry commits to the
-previous one, so editing any past entry breaks `audit.verify()` — tamper-evident.
-In production each entry is also shipped out-of-band so a compromised sandbox
-can't erase its own trail.
+The audit log is **hash-chained** (`AuditLog`): each entry commits selected
+action and decision fields to the previous hash. `audit.verify()` detects
+changes to those committed fields. It is in memory only; durable, out-of-band
+storage would be needed for a production audit trail.
 
 ## Run
 
 ```bash
+cd sentinel-poc
 python3.13 run_demo.py        # swarm demo + response-on-detection + chain verify
 python3.13 test_sentinel.py   # 15 assertions  (or: pytest)
 ```
@@ -75,14 +110,30 @@ This deployment needs a **Linux host with KVM** and the Firecracker binary. It
 cannot boot directly on macOS. Obtain a compatible guest kernel image from the
 [Firecracker releases](https://github.com/firecracker-microvm/firecracker/releases)
 for the host architecture. On a Debian/Ubuntu Linux host, install `debootstrap`,
-`e2fsprogs`, `iproute2`, and `nftables`, plus Python 3.13 on the host, then
+`e2fsprogs`, `iproute2`, `nftables`, and `coreutils`, plus Python 3.13 on the host, then
 build a Debian Trixie guest image:
 
 ```bash
+cd sentinel-poc
 sudo deploy/microvm/build-rootfs.sh /path/to/agent.ext4
 sudo KERNEL_IMAGE=/path/to/vmlinux ROOTFS_IMAGE=/path/to/agent.ext4 \
   deploy/microvm/run.sh
 ```
+
+To run the boot integration test on that Linux/KVM host, build a fresh guest
+image from the current source, then run:
+
+```bash
+cd sentinel-poc
+sudo KERNEL_IMAGE=/path/to/vmlinux ROOTFS_IMAGE=/path/to/agent.ext4 \
+  deploy/microvm/test-boot.sh
+```
+
+The test boots the guest, waits up to 120 seconds, and checks that two benign
+actions were allowed and an external-host send was denied by
+`egress-allowlist`. The guest prints `SENTINEL_BOOT_TEST_PASS` only after all
+three responses match. The test exits 77 with `SKIP` on hosts without Linux
+KVM. It has not been run on this macOS development machine.
 
 The rootfs builder downloads Debian packages. The launcher creates one TAP,
 one dedicated nftables table, and a temporary VM config, then removes them on
@@ -99,12 +150,6 @@ resource limits, following the [Firecracker host guidance](https://github.com/fi
   Python dependencies. Its HTTP service returns decisions only; it does not
   perform approved file, tool, DNS, or network effects.
 
-```
-  Firecracker guest                    Linux host
-  agent (172.16.0.2) ── TAP ──▶ firewall ──▶ sentinel (172.16.0.1:8085)
-  no default route                        all other guest traffic dropped
-```
-
 ## Honest limits (what a reviewer will ask)
 
 1. **The microVM launcher is a PoC, not a hardened host setup.** Firecracker
@@ -120,5 +165,7 @@ resource limits, following the [Firecracker host guidance](https://github.com/fi
 3. **Taint tracking is only as good as the provenance signal.** Here agents
    declare `derived_from`; in production you need the adapter to attach
    provenance so the agent can't simply omit it.
-4. **The sentinel must stay simpler than what it guards** and be hardened — the
-   OpenAI escape was *through the guard*. Hence stdlib-only, non-root, read-only.
+4. **The sentinel must stay simpler than what it guards.** The current host
+   launcher starts the stdlib-only sentinel and Firecracker as root and does
+   not persist audit logs. A production host needs privilege separation,
+   Firecracker's jailer, and durable logging.

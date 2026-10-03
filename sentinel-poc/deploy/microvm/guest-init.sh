@@ -14,6 +14,10 @@ set -eu
 export BROKER_URL=http://172.16.0.1:8085/submit
 export PYTHONDONTWRITEBYTECODE=1
 cd /app
-/usr/bin/setpriv --reuid=10002 --regid=10002 --clear-groups \
-    /usr/bin/python3 -B -m swarm.agent_client || true
+if /usr/bin/setpriv --reuid=10002 --regid=10002 --clear-groups \
+    /usr/bin/python3 -B -m swarm.agent_client; then
+    echo SENTINEL_BOOT_TEST_PASS
+else
+    echo SENTINEL_BOOT_TEST_FAIL
+fi
 /bin/busybox reboot -f

