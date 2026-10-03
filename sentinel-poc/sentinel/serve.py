@@ -17,6 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from sentinel import Broker, Budget, Capability, Monitor, Policy, ResponsePolicy
 from sentinel.actions import Action, ActionType
 from sentinel.response import Alert
+from swarm.catalog import AGENT_ROLES, TOOL_BINARIES
 
 
 def default_broker() -> Broker:
@@ -25,11 +26,11 @@ def default_broker() -> Broker:
     cap = Capability(
         allowed_types=frozenset(ActionType),
         net_allowlist=frozenset({"api.internal.svc"}),
-        tool_allowlist=frozenset({"python"}),
+        tool_allowlist=TOOL_BINARIES,
         read_prefixes=("/work/", "/secrets/"),
         write_prefixes=("/work/tmp/",),
     )
-    for a in (f"agent-{i}" for i in range(1, 11)):
+    for a in AGENT_ROLES:
         policy.grant(a, cap)
     monitor = Monitor(
         Budget(5000, 20, 2), Budget(50000, 100, 3),

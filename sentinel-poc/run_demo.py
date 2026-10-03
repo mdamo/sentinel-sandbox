@@ -16,6 +16,8 @@ from sentinel import (Broker, Budget, Capability, Monitor, Policy,
 from sentinel.actions import ActionType
 from sentinel.response import Alert
 from swarm import scenarios
+from swarm.catalog import AGENT_ROLES, TOOL_BINARIES
+from swarm.ai_agents import ToolRegistry, build_ai_agents
 
 
 def _alert_sink(a: Alert) -> None:
@@ -39,11 +41,11 @@ def build_sentinel(response: ResponsePolicy | None = None) -> Broker:
             ActionType.DNS_RESOLVE, ActionType.BUS_PUBLISH,
         }),
         net_allowlist=frozenset({"api.internal.svc"}),
-        tool_allowlist=frozenset({"python"}),
+        tool_allowlist=TOOL_BINARIES,
         read_prefixes=("/work/", "/secrets/"),
         write_prefixes=("/work/tmp/",),
     )
-    for agent in ("agent-1", "agent-2", "agent-3", "agent-4", "agent-5", "agent-6"):
+    for agent in AGENT_ROLES:
         policy.grant(agent, Capability(**base))
 
     monitor = Monitor(
@@ -57,6 +59,15 @@ def build_sentinel(response: ResponsePolicy | None = None) -> Broker:
 
 
 def main() -> int:
+    ai_broker = build_sentinel()
+    tools = ToolRegistry(ai_broker)
+    print("AI AGENT SWARM — 6 agents, 6 tools (offline simulation backend)")
+    ai_ok = True
+    for agent in build_ai_agents():
+        for action, decision in agent.run("result ok", tools):
+            print(f"  {agent.agent_id} ({agent.role}): {action.type.value} -> {decision.rule}")
+            ai_ok &= decision.allow
+    ai_ok &= ai_broker.audit.verify()
     broker = build_sentinel()
 
     plan = [
@@ -107,7 +118,7 @@ def main() -> int:
 
     print("\n--- VERDICTS ---")
     width = max(len(n) for n, _ in verdicts)
-    all_pass = True
+    all_pass = ai_ok
     for name, ok in verdicts:
         all_pass &= ok
         print(f"  {name:<{width}}  {'PASS' if ok else 'FAIL'}")

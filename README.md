@@ -101,8 +101,36 @@ storage would be needed for a production audit trail.
 ```bash
 cd sentinel-poc
 python3.13 run_demo.py        # swarm demo + response-on-detection + chain verify
-python3.13 test_sentinel.py   # 15 assertions  (or: pytest)
+python3.13 test_sentinel.py   # 19 tests  (or: pytest)
 ```
+
+## Six AI agents and six tools
+
+The local demo now creates six `AIAgent` instances with distinct roles:
+researcher, writer, analyst, reporter, resolver, and coordinator (`agent-1`
+through `agent-6`). The HTTP service grants the same six identities.
+
+| Tool | Sentinel action |
+|---|---|
+| `read_file` | `file_read` |
+| `write_file` | `file_write` |
+| `run_python` | `tool_exec` (python only) |
+| `send_result` | `net_send` |
+| `resolve_host` | `dns_resolve` |
+| `publish_message` | `bus_publish` |
+
+`swarm/ai_agents.py` provides the model interface and tool registry. Every tool
+call goes through `Broker.submit`, including provenance supplied in
+`ToolCall.derived_from`. Tools submit abstract intents and do not execute real
+effects. The six tools wrap the existing action vocabulary; only `python` is
+an allowed tool binary.
+
+The default `OfflineModel` is a scripted simulation, **not a live LLM**. To
+integrate a model, implement `propose(role, task) -> list[ToolCall]` and pass
+that backend to `build_ai_agents(model)`. The model proposes actions; the
+sentinel remains deterministic and retains sole authority to allow or deny.
+No provider, API credentials, or external model transport is bundled. The
+microVM client still runs its existing three-action mediation smoke test.
 
 ## Firecracker microVM deployment
 

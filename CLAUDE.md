@@ -46,10 +46,12 @@ agent → Action (typed intent) → Broker.submit()
 | `sentinel/response.py` | `ResponseMode`, `ResponsePolicy`, `Alert`. Maps a fired rule → escalation (deny / kill agent / quarantine swarm). |
 | `sentinel/broker.py` | Single enforcement point + hash-chained `AuditLog` (`verify()`). Complete mediation. |
 | `sentinel/serve.py` | Stdlib HTTP front end on the Linux host. |
+| `swarm/catalog.py` | Shared six-agent roster and six tool names. |
+| `swarm/ai_agents.py` | Model proposal interface, offline backend, and mediated tools. |
 | `swarm/scenarios.py` | Abstract benign + misbehaving agent behaviours. |
 | `swarm/agent_client.py` | In-guest agent that POSTs actions to the sentinel. |
 | `run_demo.py` | End-to-end demo with audit log + verdict table. |
-| `test_sentinel.py` | One assertion per pattern. 10 tests. |
+| `test_sentinel.py` | One assertion per pattern. 19 tests. |
 | `deploy/microvm/` | Firecracker guest builder, Linux host launcher, and boot integration test; no Docker runtime. |
 
 ## Invariants — must stay true after any change
@@ -59,7 +61,8 @@ agent → Action (typed intent) → Broker.submit()
    `Monitor._respond`. Keep the mapping data-driven; don't re-hard-code kills in
    the review logic. `DENY_ONLY` must emit no alert; the other modes always alert.
 1. **No LLM in the decision path.** `Policy` and `Monitor` are pure Python logic.
-   An LLM may only ever be added *off the critical path* as an advisor that
+   Untrusted agent models may propose actions through the broker, never decide
+   permission. A trusted LLM advisor may only be added *off the critical path* and
    proposes *stricter* rules or flags for a human — never to make an allow.
    `on_alert` is the hook where a human/LLM advisor would receive events.
 2. **Monitor can only make a decision stricter, never looser.** It runs after the
@@ -96,7 +99,7 @@ agent → Action (typed intent) → Broker.submit()
 cd sentinel-poc
 python3.13 run_demo.py    # expect: ALL SCENARIOS BEHAVED AS EXPECTED, 7 denied,
                           #         audit chain verifies: True, quarantine demo
-python3.13 test_sentinel.py # expect: 15/15 tests passed   (pytest also works)
+python3.13 test_sentinel.py # expect: 19/19 tests passed   (pytest also works)
 
 # two-process HTTP check (proves mediation across a boundary):
 SENTINEL_BIND=127.0.0.1:8085 python3.13 -m sentinel.serve &

