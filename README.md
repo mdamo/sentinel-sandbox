@@ -6,7 +6,7 @@ capabilities, budgets, taint tracking, and cross-agent correlation before
 returning an allow or deny decision with the rule that fired. Decisions depend
 on the action, configured rules, and accumulated state; no LLM decides permission.
 
-The repository includes four ways to exercise the same broker:
+The repository includes abstract demos plus an opt-in trusted execution service:
 
 - **Local demo:** six scripted agents and abstract attack scenarios run in one
   Python process. No microVM or live model is started.
@@ -16,12 +16,18 @@ The repository includes four ways to exercise the same broker:
   the sentinel service.
 - **Firecracker deployment:** an unprivileged guest client submits records to
   a sentinel on the Linux/KVM host through a restricted TAP interface.
+- **Trusted execution service:** authenticated callers request real workspace
+  reads, create-only writes, scoped HTTP/DNS operations, and messages. SQLite
+  persists budgets, sensitivity, audit, idempotency, and quarantine. See the
+  [Linux execution guide](EXECUTION_GUIDE.md) for setup and recovery.
 
 An allowlist alone cannot detect every misuse of a permitted destination. This
 PoC adds stateful checks to demonstrate how a broker can block those patterns.
 
-> **Safety note.** Action requests perform no real file, tool, or outbound
-> network effects and contain no exploit. The live demo makes real HTTPS requests
+> **Safety note.** The original demos perform no real file, tool, or outbound
+> network effects and contain no exploit. The opt-in execution service performs
+> narrowly scoped real effects; tests use temporary files and local services.
+> The live demo makes real HTTPS requests
 > to NVIDIA for model proposals. The microVM launcher configures a
 > local TAP/firewall, and the agent sends action records to the host sentinel.
 > The "attacks" remain abstract action records, not working attack code.
@@ -52,13 +58,15 @@ flowchart LR
 The guest has one network interface and no default route. The host firewall
 drops guest traffic except requests to the sentinel. The broker first applies
 the per-action policy, then the stateful monitor, and returns a named rule with
-every decision. An `allow` is only a decision: this PoC has no trusted adapter
-that performs the requested file, tool, DNS, or outbound network effect.
+every decision. In abstract mode an `allow` is only a decision. The separate
+execution service performs approved effects through trusted adapters and
+rejects arbitrary Python/shell execution.
 
 The sentinel prints audited decisions and escalation alerts to stdout. The
 audit chain lives in memory and is lost when the process exits. The boot test
 captures host and guest console output in a temporary file, prints it on
-failure, and deletes it on exit; there is no persistent log store yet.
+failure, and deletes it on exit. Execution mode instead persists redacted audit
+and security state in SQLite with signed checkpoints for independent retention.
 
 ## Layers
 
@@ -72,6 +80,9 @@ failure, and deletes it on exit; there is no persistent log store yet.
 | Agent interface | `swarm/ai_agents.py`, `swarm/catalog.py` | Six agent roles, a scripted model backend, and six tools that submit abstract actions. |
 | Live model backend | `swarm/nemotron.py`, `swarm/live_demo.py` | NVIDIA Nemotron proposes calls; the local sentinel decides permission. |
 | HTTP front end | `sentinel/serve.py` | Same broker as a stdlib HTTP service on the Linux host. |
+| Execution boundary | `sentinel/runtime.py`, `sentinel/adapters.py` | Authenticated effects, sticky sensitivity, handles, reservations, and idempotency. |
+| Durable state | `sentinel/storage.py` | Single-writer SQLite, audit chain, signed state/checkpoints. |
+| Authenticated API | `sentinel/execution_service.py` | Protected Unix socket or TLS, separate agent/admin endpoints. |
 
 ## What it catches (and how)
 
@@ -105,12 +116,14 @@ sending agent). The local demo uses the original preset, then demonstrates the
 strict preset separately. The HTTP service uses the strict preset.
 
 These responses change broker state; they do not terminate processes or stop
-the VM. There is no review or resume endpoint.
+the VM. Abstract mode has no review/resume endpoint. Execution mode provides
+authenticated incident recovery while retaining budgets and sensitivity.
 
 The audit log is **hash-chained** (`AuditLog`): each entry commits selected
 action and decision fields to the previous hash. `audit.verify()` detects
 changes to those committed fields. It is in memory only; durable, out-of-band
-storage would be needed for a production audit trail.
+storage is used in execution mode. Independently retain signed checkpoints;
+automatic remote checkpoint shipping is not implemented.
 
 ## Quick start
 
@@ -288,8 +301,9 @@ resource limits, following the [Firecracker host guidance](https://github.com/fi
 - Host firewall rules allow guest traffic only to the sentinel on
   `172.16.0.1:8085`; guest forwarding is denied even if the guest changes routes.
 - The sentinel runs on the Linux host, outside the guest, and has no third-party
-  Python dependencies. Its HTTP service returns decisions only; it does not
-  perform approved file, tool, DNS, or network effects.
+  Python dependencies. Default HTTP mode returns abstract decisions only.
+  Optional execution mode uses TLS and runs the service under a dedicated
+  non-root identity; see [the execution guide](EXECUTION_GUIDE.md).
 
 ## Honest limits (what a reviewer will ask)
 
@@ -303,20 +317,37 @@ resource limits, following the [Firecracker host guidance](https://github.com/fi
    intended design pairs this deterministic enforcer (final authority) with an
    optional LLM analyzer that sits **off the critical path** and may only
    *propose stricter* rules or flag for a human — never loosen policy.
-3. **Taint tracking is only as good as the provenance signal.** Here agents
-   declare `derived_from`; in production you need the adapter to attach
-   provenance so the agent can't simply omit it.
+3. **Abstract provenance remains caller supplied.** Execution mode validates
+   opaque handles and conservatively labels contexts/files. Sensitive inputs
+   arriving through other channels still need trusted classification.
 4. **The sentinel must stay simpler than what it guards.** The current host
    launcher starts the stdlib-only sentinel and Firecracker as root and does
-   not persist audit logs. A production host needs privilege separation,
-   Firecracker's jailer, and durable logging.
+   not persist audit logs in abstract mode. Execution mode has durable state
+   and a non-root service option; production still needs Firecracker's jailer
+   and independently retained checkpoints.
 
 5. **The HTTP boundary is a demonstration interface.** Agent identities are
-   supplied by the caller without authentication. The threaded server shares
-   mutable broker state without synchronization. Production needs authenticated
-   identities, request validation and limits, and serialized or synchronized
-   state updates.
-6. **Path checks operate on supplied strings.** Read/write scopes use prefix
-   matching, and canaries use exact path matching. A real file adapter needs
-   canonical path resolution and protection against traversal and symlinks
-   before performing effects.
+   supplied by the caller without authentication in `sentinel.serve`; use the
+   separate authenticated service for effects. Broker submissions now serialize
+   state, and both HTTP interfaces bound request bodies.
+6. **Filesystem isolation remains a deployment requirement.** Policy scopes
+   match directory components and reject traversal. Execution uses no-follow,
+   descriptor-relative opens and create-only writes, but requires a workspace
+   that agents cannot mutate directly.
+
+## Execution verification
+
+Follow [EXECUTION_GUIDE.md](EXECUTION_GUIDE.md) for configuration, API contracts,
+and recovery. From `sentinel-poc`, run `bash deploy/verify-linux.sh`, or explicitly
+select the installed interpreter with `PYTHON=python3`. Local Python 3.12.3 checks
+passed all 19 abstract tests, 26 execution tests, and the original demo. Deployment
+shell syntax also passed. Python 3.13 itself remains unverified in this environment.
+
+Full enforcement completed all four benign evaluation tasks and blocked all
+four adversarial cases without harmful effects. The capability-only baseline
+allowed two synthetic leaks to a loopback mock service. Raw counts and limitations
+are in [evaluation-report.json](sentinel-poc/evaluation-report.json).
+
+Authenticated Firecracker boot remains unverified because Firecracker and guest
+images are unavailable. Production jailer integration and automatic independent
+checkpoint export remain operator work. No live NVIDIA check was run for these changes.

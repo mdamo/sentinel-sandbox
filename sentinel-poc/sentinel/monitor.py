@@ -67,7 +67,10 @@ class Monitor:
     def __init__(self, per_agent: Budget, per_swarm: Budget,
                  split_payload_threshold: int = 3,
                  response: ResponsePolicy | None = None,
-                 on_alert: AlertSink | None = None) -> None:
+                 on_alert: AlertSink | None = None,
+                 correlation_enforce: bool = True,
+                 workflow_hosts: frozenset[str] = frozenset(),
+                 correlation_window: float = 300) -> None:
         self.per_agent = per_agent
         self.per_swarm = per_swarm
         self._agent = defaultdict(_Counters)
@@ -88,6 +91,35 @@ class Monitor:
         self.killed: set[str] = set()   # agents hard-killed; all further actions denied
         self.quarantined = False        # whole cell frozen pending review
         self.alerts: list[Alert] = []   # in-memory mirror of what was shipped
+        self.correlation_enforce = correlation_enforce
+        self.workflow_hosts = workflow_hosts
+        self.correlation_window = correlation_window
+        self._activity: list[tuple[float, str, str, str]] = []
+        self.review_signals: list[dict] = []
+
+    def snapshot(self) -> dict:
+        """Trusted JSON state; the runtime stores this with each transition."""
+        def counter(c):
+            return dict(bytes_out=c.bytes_out, requests=c.requests, dests=sorted(c.dests))
+        return {
+            "agents": {k: counter(v) for k, v in self._agent.items()},
+            "swarm": counter(self._swarm), "killed": sorted(self.killed),
+            "quarantined": self.quarantined, "activity": self._activity,
+            "signals": self.review_signals,
+            "taints": {str(k): sorted(v) for k, v in self._taint_by_action.items()},
+            "provenance": {str(k): v for k, v in self._prov.items()},
+        }
+
+    def restore(self, state: dict) -> None:
+        def counter(c):
+            return _Counters(c["bytes_out"], c["requests"], set(c["dests"]))
+        self._agent = defaultdict(_Counters, {k: counter(v) for k, v in state["agents"].items()})
+        self._swarm = counter(state["swarm"])
+        self.killed, self.quarantined = set(state["killed"]), state["quarantined"]
+        self._activity = [tuple(x) for x in state["activity"]]
+        self.review_signals = state["signals"]
+        self._taint_by_action = {int(k): set(v) for k, v in state["taints"].items()}
+        self._prov = {int(k): v for k, v in state["provenance"].items()}
 
     # ---- taint propagation ------------------------------------------------
     def _inherited_taint(self, action: Action) -> set[str]:
@@ -165,25 +197,36 @@ class Monitor:
         if why:
             return Decision(False, "budget-swarm", f"per-swarm budget exceeded: {why}")
 
-        # 3) swarm correlation.
+        # 3) bounded correlation, scoped to this monitor's run.
+        now = time.time()
+        self._activity = [x for x in self._activity if now - x[0] <= self.correlation_window]
+        self._probed_hosts = {host: agent for _, kind, host, agent in self._activity
+                              if kind == ActionType.DNS_RESOLVE.value}
+        self._senders_per_dest = defaultdict(set)
+        for _, kind, host, agent in self._activity:
+            if kind == ActionType.NET_SEND.value:
+                self._senders_per_dest[host].add(agent)
         if dest is not None:
             # split-role: a different agent probed this exact host first.
             prober = self._probed_hosts.get(dest)
             if action.type == ActionType.NET_SEND and prober and prober != action.agent_id:
-                return Decision(False, "corr-split-role",
-                                f"host {dest!r} was probed by {prober} then sent to by "
-                                f"{action.agent_id} — cross-agent staging")
+                if self.correlation_enforce and dest not in self.workflow_hosts:
+                    return Decision(False, "corr-split-role", "cross-agent staging")
+                if dest not in self.workflow_hosts:
+                    self.review_signals.append(dict(action_id=action.id, rule="corr-split-role", ts=now))
             # split-payload: too many distinct agents converging on one dest.
             senders = self._senders_per_dest[dest] | {action.agent_id}
             if action.type == ActionType.NET_SEND and len(senders) >= self._split_threshold:
-                return Decision(False, "corr-split-payload",
-                                f"{len(senders)} distinct agents sending to {dest!r} — "
-                                f"distributed exfiltration pattern")
+                if self.correlation_enforce and dest not in self.workflow_hosts:
+                    return Decision(False, "corr-split-payload", "distributed sender pattern")
+                if dest not in self.workflow_hosts:
+                    self.review_signals.append(dict(action_id=action.id, rule="corr-split-payload", ts=now))
 
         # passed every stricter check: commit state and allow.
         a.apply(add_bytes, dest)
         self._swarm.apply(add_bytes, dest)
         if dest is not None:
+            self._activity.append((now, action.type.value, dest, action.agent_id))
             if action.type == ActionType.DNS_RESOLVE:
                 self._probed_hosts.setdefault(dest, action.agent_id)
             if action.type == ActionType.NET_SEND:

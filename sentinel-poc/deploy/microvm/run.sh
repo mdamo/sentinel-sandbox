@@ -59,7 +59,20 @@ nft add rule inet "$table" forward iifname "$tap" drop
 echo "[network | host] tap=$tap host=172.16.0.1 guest=172.16.0.2; guest access limited to sentinel TCP/8085"
 
 cd "$project_dir"
-SENTINEL_BIND=172.16.0.1:8085 python3.13 -m sentinel.serve &
+if [[ -n ${SENTINEL_EXEC_CONFIG:-} ]]; then
+    : "${SENTINEL_TLS_CERT:?Set the TLS certificate with IP SAN 172.16.0.1}"
+    : "${SENTINEL_TLS_KEY:?Set the host TLS key}"
+    : "${SENTINEL_SERVICE_USER:?Set a dedicated non-root service user}"
+    if [[ $(id -u "$SENTINEL_SERVICE_USER") == 0 ]]; then
+        echo 'Execution service must run as a non-root user.' >&2
+        exit 1
+    fi
+    runuser -u "$SENTINEL_SERVICE_USER" -- python3.13 -m sentinel.execution_service \
+        --config "$SENTINEL_EXEC_CONFIG" --tls-bind 172.16.0.1:8085 \
+        --cert "$SENTINEL_TLS_CERT" --key "$SENTINEL_TLS_KEY" &
+else
+    SENTINEL_BIND=172.16.0.1:8085 python3.13 -m sentinel.serve &
+fi
 sentinel_pid=$!
 echo "[sentinel | host] launched pid=$sentinel_pid; waiting for service ready log"
 

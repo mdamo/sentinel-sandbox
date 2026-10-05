@@ -48,8 +48,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/submit":
             self.send_error(404)
             return
-        length = int(self.headers.get("Content-Length", 0))
         try:
+            self.connection.settimeout(5)
+            length = int(self.headers.get("Content-Length", 0))
+            if not 0 < length <= 65536 or self.headers.get("Transfer-Encoding"):
+                raise ValueError("invalid request size or framing")
             body = json.loads(self.rfile.read(length) or b"{}")
             action = Action(
                 agent_id=body["agent_id"],

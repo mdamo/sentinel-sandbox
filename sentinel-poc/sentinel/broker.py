@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import copy
+import threading
 from dataclasses import dataclass, field
 
 from .actions import Action, Decision
@@ -72,7 +74,7 @@ class AuditLog:
 
     def append(self, action: Action, decision: Decision) -> AuditEntry:
         prev = self._entries[-1].hash if self._entries else GENESIS
-        entry = AuditEntry(action, decision, prev_hash=prev)
+        entry = AuditEntry(copy.deepcopy(action), copy.deepcopy(decision), prev_hash=prev)
         entry.hash = entry.compute_hash()
         self._entries.append(entry)
         return entry
@@ -102,8 +104,13 @@ class Broker:
         self.monitor = monitor
         self.audit = AuditLog()
         self.fail_closed = True
+        self.lock = threading.RLock()
 
     def submit(self, action: Action) -> Decision:
+        with self.lock:
+            return self._submit(copy.deepcopy(action))
+
+    def _submit(self, action: Action) -> Decision:
         try:
             policy_decision = self.policy.evaluate(action)
             decision = self.monitor.review(action, policy_decision)

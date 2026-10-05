@@ -27,6 +27,19 @@ debootstrap --variant=minbase --include=python3,iproute2,busybox-static,util-lin
     trixie "$tmpdir/root" https://deb.debian.org/debian
 mkdir -p "$tmpdir/root/app" "$tmpdir/root/proc" "$tmpdir/root/sys" "$tmpdir/root/dev"
 cp -a "$project_dir/swarm" "$tmpdir/root/app/"
+if [[ -n ${EXECUTION_GUEST_TOKEN_FILE:-} || -n ${EXECUTION_CA_FILE:-} ]]; then
+    : "${EXECUTION_GUEST_TOKEN_FILE:?Set the non-admin agent token file}"
+    : "${EXECUTION_CA_FILE:?Set the public CA/certificate file}"
+    : "${EXECUTION_HOST_WORKSPACE:?Set the host workspace absolute path for the isolation check}"
+    install -m 0400 -o 10002 -g 10002 "$EXECUTION_GUEST_TOKEN_FILE" "$tmpdir/root/app/execution.token"
+    install -m 0444 "$EXECUTION_CA_FILE" "$tmpdir/root/app/execution-ca.pem"
+    python3 - "$EXECUTION_HOST_WORKSPACE" "$tmpdir/root/app/execution-boot.json" <<'PY'
+import json
+import sys
+with open(sys.argv[2], "w") as destination:
+    json.dump({"host_workspace": sys.argv[1]}, destination)
+PY
+fi
 install -m 0755 "$project_dir/deploy/microvm/guest-init.sh" "$tmpdir/root/sbin/sentinel-guest-init"
 rm -f "$tmpdir/root/sbin/init"
 ln -s /sbin/sentinel-guest-init "$tmpdir/root/sbin/init"
@@ -37,5 +50,9 @@ if ! mkfs.ext4 -q -F -d "$tmpdir/root" "$output"; then
     rm -f "$output"
     exit 1
 fi
-chmod 0644 "$output"
+if [[ -n ${EXECUTION_GUEST_TOKEN_FILE:-} ]]; then
+    chmod 0600 "$output"  # Image now contains a scoped agent credential.
+else
+    chmod 0644 "$output"
+fi
 echo "Built $output"

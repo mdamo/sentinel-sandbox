@@ -18,13 +18,18 @@ but not sufficient, so the sentinel adds stateful, swarm-aware checks on top.
 
 ## Safety framing — DO NOT BREAK THIS
 
-This is defensive tooling plus a test harness. **Actions perform no real file,
+This is defensive tooling plus a test harness. **The original demos perform no real file,
 tool, or outbound network effects and nothing contains an exploit.** The
 microVM launcher configures a local TAP/firewall and the guest sends action
 records to the host sentinel. The "attacks" in `swarm/scenarios.py` remain
 abstract action records, NOT working attack code.
 
-If asked to extend the attack scenarios, keep them at the same abstract level —
+The user authorized `LINUX_IMPLEMENTATION_PLAN.md`, including an opt-in trusted
+execution service with real scoped file/HTTP effects. Keep it separate from the
+abstract demos; its adapter tests use temporary files and local HTTP/TLS fixtures.
+See `EXECUTION_GUIDE.md` for configuration and security contracts.
+
+If asked to extend the abstract attack scenarios, keep them at the same abstract level —
 add new `Action` shapes and expected-deny rules, never real exploit code, real
 network calls, or real credential handling. The value is in showing the sentinel
 *denies* the pattern, not in demonstrating the exploit.
@@ -54,6 +59,12 @@ agent → Action (typed intent) → Broker.submit()
 | `swarm/agent_client.py` | In-guest agent that POSTs actions to the sentinel. |
 | `run_demo.py` | End-to-end demo with audit log + verdict table. |
 | `test_sentinel.py` | One assertion per pattern. 19 tests. |
+| `sentinel/runtime.py` | Authenticated execution, durable sensitivity/handles, reservations, idempotency, admin recovery. |
+| `sentinel/adapters.py` | Scoped file and pinned-address HTTP/DNS effects; arbitrary tools disabled. |
+| `sentinel/storage.py` | Single-writer SQLite, audit chain, signed state/checkpoints. |
+| `sentinel/execution_service.py` | Opt-in Unix/TLS API with bounded handlers and authenticated identities. |
+| `test_runtime.py` | 26 stdlib execution/concurrency/recovery tests with controlled fixtures. |
+| `evaluate_runtime.py` | Eight workloads comparing capability-only and full enforcement. |
 | `deploy/microvm/` | Firecracker guest builder, Linux host launcher, and boot integration test; no Docker runtime. |
 
 ## Invariants — must stay true after any change
@@ -83,6 +94,8 @@ agent → Action (typed intent) → Broker.submit()
    taint; it propagates through `Action.derived_from`; any outbound action
    carrying it is denied by `taint-egress`. Don't drop the propagation in
    `Monitor._inherited_taint` / `record_result`.
+   Execution mode also labels agent contexts and files durably before dispatch;
+   sensitive outputs must be denied even when dependencies are omitted.
 7. **The host-side sentinel stays stdlib-only.** It guards everything, so it
    must stay small and auditable. The guest image is read-only and the guest
    agent runs as an unprivileged UID. Host network rules must continue to deny
@@ -115,6 +128,13 @@ sudo KERNEL_IMAGE=/path/to/vmlinux ROOTFS_IMAGE=/path/to/agent.ext4 deploy/micro
 
 **Always run both `run_demo.py` and `test_sentinel.py` after a change** and
 confirm the counts above before claiming it works.
+
+For execution changes also run `python3.13 test_runtime.py` and
+`python3.13 evaluate_runtime.py --output evaluation-report.json`, or run
+`bash deploy/verify-linux.sh`. Report interpreter substitutions explicitly.
+OpenSSL is required for the local TLS fixture; a missing tool produces a skip.
+Authenticated Firecracker tests require fresh guest provisioning and are separate
+from local tests. Current checks passed on Python 3.12.3, not Python 3.13.
 
 ## Live NVIDIA proposal backend
 
@@ -151,13 +171,24 @@ has not yet been verified.
   KVM, and firewall remain trusted.
 - Deterministic means it only catches specified patterns; the correlation rules
   are illustrative and need a tuned, reviewed catalogue in production.
-- Taint tracking relies on honest `derived_from`; production needs the adapter
-  to attach provenance so an agent can't omit it.
+- Abstract taint tracking relies on `derived_from`; execution mode validates
+  handles and keeps sticky contexts. Unmodelled inputs need trusted classification.
+- Execution payloads are memory-only; restart retains labels and metadata but
+  cannot return old result content. Never replay effects merely to recover results.
+- Reservations are charged without refunds. DNS uses an application allowance,
+  not packet-level accounting. Pending effects become uncertain on restart.
+- Execution correlation is review-only with a bounded window; the abstract
+  demos retain blocking rules. Workflow permissions suppress expected signals.
+- Storage failure prevents new effects. Resume must preserve budgets, sensitivity,
+  and idempotency; uncertain effects must never be automatically replayed.
+- Production jailer integration and automatic remote checkpoint export remain
+  unimplemented. Do not describe the microVM smoke-test launcher as hardened.
 
 ## Conventions
 
 - Python 3.13, standard library only. No runtime third-party deps.
 - Dataclasses for state; `Enum` for action types.
-- Keep `policy.py` stateless and `monitor.py` the only place with mutable state.
+- Keep `policy.py` stateless. Abstract state belongs to `Monitor`; execution
+  state belongs to `Runtime` and its SQLite transitions under the broker lock.
 - When adding a pattern: add the abstract scenario, add a handler/rule if needed,
   add a test asserting the exact `rule`, update both README tables and this file.

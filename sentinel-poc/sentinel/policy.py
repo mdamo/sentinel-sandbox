@@ -18,8 +18,17 @@ Design choices that matter:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 
 from .actions import Action, ActionType, Decision
+
+
+def in_scope(path: str, scope: str) -> bool:
+    """Directory component matching; never normalize away traversal."""
+    if not isinstance(path, str) or "\x00" in path or ".." in path.split("/"):
+        return False
+    p, root = PurePosixPath(path), PurePosixPath(scope)
+    return p == root or root in p.parents
 
 
 @dataclass(frozen=True)
@@ -89,24 +98,23 @@ class Policy:
     def _dns(self, action: Action, cap: Capability) -> Decision:
         host = action.params.get("host", "")
         # only allow DNS for hosts the agent could legitimately reach
-        base = host.split(".", 1)[-1] if host.count(".") > 1 else host
-        if host in cap.net_allowlist or base in cap.net_allowlist:
+        if host in cap.net_allowlist:
             return Decision(True, "dns-allowlist", f"resolve {host!r} permitted")
         return Decision(False, "dns-allowlist",
                         f"DNS for {host!r} not permitted (possible covert channel)")
 
     def _read(self, action: Action, cap: Capability) -> Decision:
         path = action.params.get("path", "")
-        if not any(path.startswith(p) for p in cap.read_prefixes):
+        if not any(in_scope(path, p) for p in cap.read_prefixes):
             return Decision(False, "fs-read-scope", f"read of {path!r} outside granted scope")
         taints: set[str] = set()
-        if any(path.startswith(p) for p in self.sensitive_prefixes):
+        if any(in_scope(path, p) for p in self.sensitive_prefixes):
             taints.add(f"sensitive:{path}")
         return Decision(True, "fs-read-scope", f"read {path!r} permitted", taints=taints)
 
     def _write(self, action: Action, cap: Capability) -> Decision:
         path = action.params.get("path", "")
-        if not any(path.startswith(p) for p in cap.write_prefixes):
+        if not any(in_scope(path, p) for p in cap.write_prefixes):
             return Decision(False, "fs-write-scope", f"write to {path!r} outside granted scope")
         return Decision(True, "fs-write-scope", f"write {path!r} permitted")
 
