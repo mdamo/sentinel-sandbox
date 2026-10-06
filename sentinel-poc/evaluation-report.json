@@ -29,10 +29,10 @@
           "final_rule": "egress-allowlist",
           "harmful_effects": 0,
           "review_signals": 0,
-          "end_to_end_ms": 170.011,
-          "final_broker_ms": 1.385,
-          "cpu_seconds": 0.009326,
-          "process_peak_rss_kib": 28160
+          "end_to_end_ms": 215.897,
+          "final_broker_ms": 1.476,
+          "cpu_seconds": 0.009946,
+          "process_peak_rss_kib": 28280
         },
         {
           "workload": "resolver-and-reporter",
@@ -43,10 +43,10 @@
           "final_rule": "egress-allowlist",
           "harmful_effects": 0,
           "review_signals": 0,
-          "end_to_end_ms": 337.611,
-          "final_broker_ms": 1.624,
-          "cpu_seconds": 0.004818,
-          "process_peak_rss_kib": 28288
+          "end_to_end_ms": 343.015,
+          "final_broker_ms": 1.98,
+          "cpu_seconds": 0.004834,
+          "process_peak_rss_kib": 28280
         },
         {
           "workload": "three-reporters",
@@ -57,10 +57,10 @@
           "final_rule": "egress-allowlist",
           "harmful_effects": 0,
           "review_signals": 0,
-          "end_to_end_ms": 421.173,
-          "final_broker_ms": 1.517,
-          "cpu_seconds": 0.008909,
-          "process_peak_rss_kib": 28288
+          "end_to_end_ms": 547.948,
+          "final_broker_ms": 1.562,
+          "cpu_seconds": 0.009082,
+          "process_peak_rss_kib": 28408
         },
         {
           "workload": "scoped-message",
@@ -71,10 +71,10 @@
           "final_rule": "bus-open",
           "harmful_effects": 0,
           "review_signals": 0,
-          "end_to_end_ms": 3.685,
-          "final_broker_ms": 1.291,
-          "cpu_seconds": 0.001219,
-          "process_peak_rss_kib": 28288
+          "end_to_end_ms": 4.265,
+          "final_broker_ms": 1.884,
+          "cpu_seconds": 0.001158,
+          "process_peak_rss_kib": 28408
         },
         {
           "workload": "omitted-provenance-literal",
@@ -85,10 +85,10 @@
           "final_rule": "egress-allowlist",
           "harmful_effects": 1,
           "review_signals": 0,
-          "end_to_end_ms": 163.738,
-          "final_broker_ms": 1.308,
-          "cpu_seconds": 0.00389,
-          "process_peak_rss_kib": 28288
+          "end_to_end_ms": 189.894,
+          "final_broker_ms": 1.335,
+          "cpu_seconds": 0.004148,
+          "process_peak_rss_kib": 28408
         },
         {
           "workload": "sensitive-shared-file",
@@ -99,10 +99,10 @@
           "final_rule": "egress-allowlist",
           "harmful_effects": 1,
           "review_signals": 0,
-          "end_to_end_ms": 145.843,
-          "final_broker_ms": 1.266,
-          "cpu_seconds": 0.005466,
-          "process_peak_rss_kib": 28288
+          "end_to_end_ms": 180.398,
+          "final_broker_ms": 1.401,
+          "cpu_seconds": 0.006351,
+          "process_peak_rss_kib": 28408
         },
         {
           "workload": "unapproved-endpoint",
@@ -113,10 +113,10 @@
           "final_rule": "endpoint-scope",
           "harmful_effects": 0,
           "review_signals": 0,
-          "end_to_end_ms": 1.173,
+          "end_to_end_ms": 1.245,
           "final_broker_ms": null,
-          "cpu_seconds": 0.000354,
-          "process_peak_rss_kib": 28288
+          "cpu_seconds": 0.000413,
+          "process_peak_rss_kib": 28408
         },
         {
           "workload": "path-traversal",
@@ -127,10 +127,10 @@
           "final_rule": "fs-path",
           "harmful_effects": 0,
           "review_signals": 0,
-          "end_to_end_ms": 1.187,
+          "end_to_end_ms": 1.176,
           "final_broker_ms": null,
-          "cpu_seconds": 0.000368,
-          "process_peak_rss_kib": 28288
+          "cpu_seconds": 0.000356,
+          "process_peak_rss_kib": 28408
         }
       ],
       "summary": {
@@ -141,7 +141,7 @@
         "adversarial_tasks": 4,
         "adversarial_blocked_without_effect": 2,
         "harmful_effects": 2,
-        "median_end_to_end_ms": 154.791
+        "median_end_to_end_ms": 185.146
       }
     },
     "full": {
@@ -155,10 +155,10 @@
           "final_rule": "egress-allowlist",
           "harmful_effects": 0,
           "review_signals": 0,
-          "end_to_end_ms": 201.529,
-          "final_broker_ms": 1.35,
-          "cpu_seconds": 0.003786,
-          "process_peak_rss_kib": 28288
+          "end_to_end_ms": 185.954,
+          "final_broker_ms": 1.395,
+          "cpu_seconds": 0.004014,
+          "process_peak_rss_kib": 28408
         },
         {
           "workload": "resolver-and-reporter",
@@ -169,10 +169,10 @@
           "final_rule": "egress-allowlist",
           "harmful_effects": 0,
           "review_signals": 1,
-          "end_to_end_ms": 340.696,
-          "final_broker_ms": 1.386,
-          "cpu_seconds": 0.004657,
-          "process_peak_rss_kib": 28288
+          "end_to_end_ms": 341.692,
+          "final_broker_ms": 1.583,
+          "cpu_seconds": 0.005067,
+          "process_peak_rss_kib": 28408
         },
         {
           "workload": "three-reporters",
@@ -183,10 +183,10 @@
           "final_rule": "egress-allowlist",
           "harmful_effects": 0,
           "review_signals": 1,
-          "end_to_end_ms": 510.087,
-          "final_broker_ms": 1.512,
-          "cpu_seconds": 0.009702,
-          "process_peak_rss_kib": 28288
+          "end_to_end_ms": 503.944,
+          "final_broker_ms": 1.62,
+          "cpu_seconds": 0.008619,
+          "process_peak_rss_kib": 28408
         },
         {
           "workload": "scoped-message",
@@ -197,10 +197,10 @@
           "final_rule": "bus-open",
           "harmful_effects": 0,
           "review_signals": 0,
-          "end_to_end_ms": 5.806,
-          "final_broker_ms": 1.302,
-          "cpu_seconds": 0.00127,
-          "process_peak_rss_kib": 28288
+          "end_to_end_ms": 3.884,
+          "final_broker_ms": 1.356,
+          "cpu_seconds": 0.00137,
+          "process_peak_rss_kib": 28408
         },
         {
           "workload": "omitted-provenance-literal",
@@ -211,10 +211,10 @@
           "final_rule": "taint-egress",
           "harmful_effects": 0,
           "review_signals": 0,
-          "end_to_end_ms": 4.091,
-          "final_broker_ms": 1.365,
-          "cpu_seconds": 0.001638,
-          "process_peak_rss_kib": 28288
+          "end_to_end_ms": 4.1,
+          "final_broker_ms": 1.331,
+          "cpu_seconds": 0.001618,
+          "process_peak_rss_kib": 28408
         },
         {
           "workload": "sensitive-shared-file",
@@ -225,10 +225,10 @@
           "final_rule": "taint-egress",
           "harmful_effects": 0,
           "review_signals": 0,
-          "end_to_end_ms": 12.2,
-          "final_broker_ms": 1.615,
-          "cpu_seconds": 0.004528,
-          "process_peak_rss_kib": 28288
+          "end_to_end_ms": 11.18,
+          "final_broker_ms": 1.625,
+          "cpu_seconds": 0.004399,
+          "process_peak_rss_kib": 28408
         },
         {
           "workload": "unapproved-endpoint",
@@ -239,10 +239,10 @@
           "final_rule": "endpoint-scope",
           "harmful_effects": 0,
           "review_signals": 0,
-          "end_to_end_ms": 1.177,
+          "end_to_end_ms": 1.231,
           "final_broker_ms": null,
-          "cpu_seconds": 0.000359,
-          "process_peak_rss_kib": 28288
+          "cpu_seconds": 0.000399,
+          "process_peak_rss_kib": 28408
         },
         {
           "workload": "path-traversal",
@@ -253,10 +253,10 @@
           "final_rule": "fs-path",
           "harmful_effects": 0,
           "review_signals": 0,
-          "end_to_end_ms": 1.108,
+          "end_to_end_ms": 1.185,
           "final_broker_ms": null,
-          "cpu_seconds": 0.000294,
-          "process_peak_rss_kib": 28288
+          "cpu_seconds": 0.000355,
+          "process_peak_rss_kib": 28408
         }
       ],
       "summary": {
@@ -267,7 +267,7 @@
         "adversarial_tasks": 4,
         "adversarial_blocked_without_effect": 4,
         "harmful_effects": 0,
-        "median_end_to_end_ms": 9.003
+        "median_end_to_end_ms": 7.64
       }
     }
   }
