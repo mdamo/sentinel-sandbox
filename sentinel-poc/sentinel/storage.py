@@ -51,11 +51,12 @@ class Store:
         try:
             last = self.db.execute("SELECT seq,digest FROM audit ORDER BY seq DESC LIMIT 1").fetchone()
             seq, previous = (last[0] + 1, last[1]) if last else (1, "0" * 64)
+            snapshot = canonical(state)
             body = canonical(dict(event, seq=seq, timestamp=time.time(),
-                                  state_digest=hashlib.sha256(canonical(state).encode()).hexdigest()))
+                                  state_digest=hashlib.sha256(snapshot.encode()).hexdigest()))
             digest = hashlib.sha256((previous + body).encode()).hexdigest()
             self.db.execute("INSERT INTO audit VALUES (?,?,?,?)", (seq, body, previous, digest))
-            self.db.execute("INSERT OR REPLACE INTO state VALUES (1,?)", (canonical(state),))
+            self.db.execute("INSERT OR REPLACE INTO state VALUES (1,?)", (snapshot,))
             self.db.execute("COMMIT")
             return seq
         except BaseException:

@@ -35,6 +35,10 @@ def default_broker() -> Broker:
     monitor = Monitor(
         Budget(5000, 20, 2), Budget(50000, 100, 3),
         response=ResponsePolicy.strict(),
+        # DNS and sends by different demo roles are an expected workflow,
+        # including across client invocations sharing this broker. Suppress
+        # correlation heuristics only for this host; retain budgets and taint.
+        workflow_hosts=frozenset({"api.internal.svc"}),
         on_alert=lambda a: print(f"[sentinel | host | alert] {a.line()}", flush=True),
     )
     return Broker(policy, monitor)

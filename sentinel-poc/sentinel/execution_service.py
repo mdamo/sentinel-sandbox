@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import socketserver
 import ssl
 import threading
@@ -46,6 +47,8 @@ def load_runtime(path):
                 share_pairs=frozenset(tuple(x) for x in c.get("share_pairs", [])),
                 topics=frozenset(c.get("topics", [])),
                 endpoint_grants={k: frozenset(v.get("endpoints", [])) for k, v in c["agents"].items()},
+                max_agent_admissions=c.get('max_agent_admissions', 1024),
+                max_run_admissions=c.get('max_run_admissions', 4096),
                 workflow_hosts=frozenset(c.get("workflow_hosts", [])))
         except BaseException:
             store.close()
@@ -56,8 +59,31 @@ def load_runtime(path):
 
 
 class Handler(BaseHTTPRequestHandler):
+    def handle(self):
+        # Start before BaseHTTPRequestHandler reads the request line or headers.
+        # An absolute deadline also stops clients that drip bytes indefinitely.
+        timeout = self.server.request_timeout
+        self.connection.settimeout(timeout)
+        def expire():
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        self.read_deadline = threading.Timer(timeout, expire)
+        self.read_deadline.daemon = True
+        self.read_deadline.start()
+        try:
+            super().handle()
+        except OSError:
+            pass  # timeout/disconnect; no request body or credentials in logs
+        finally:
+            self._finish_reading()
+
+    def _finish_reading(self):
+        self.read_deadline.cancel()
+        self.read_deadline.join()
+
     def do_POST(self):
-        self.connection.settimeout(5)
         status = 200
         try:
             if self.headers.get("Transfer-Encoding") or len(self.headers.get_all("Content-Length", [])) != 1:
@@ -68,6 +94,7 @@ class Handler(BaseHTTPRequestHandler):
             raw = self.rfile.read(length)
             if len(raw) != length:
                 raise Rejected("request-framing")
+            self._finish_reading()
             body = json.loads(raw)
             if not isinstance(body, dict):
                 raise Rejected("request-shape")
@@ -107,6 +134,7 @@ class BoundedThreads:
     """Bound handlers, including slow body readers and resolver subprocesses."""
     daemon_threads = False
     block_on_close = True
+    request_timeout = 5
 
     def __init__(self, *args, **kwargs):
         self.slots = threading.BoundedSemaphore(16)
@@ -138,12 +166,22 @@ class UnixServer(BoundedThreads, socketserver.ThreadingMixIn, socketserver.UnixS
 class TLSServer(BoundedThreads, ThreadingHTTPServer):
     def get_request(self):
         request, address = super().get_request()
-        request.settimeout(5)
+        request.settimeout(self.request_timeout)
         try:
-            return self.context.wrap_socket(request, server_side=True), address
+            return self.context.wrap_socket(request, server_side=True,
+                                            do_handshake_on_connect=False), address
         except BaseException:
             request.close()
             raise
+
+    def finish_request(self, request, client_address):
+        # Called in a bounded worker, never in the accept loop. SSL's timeout
+        # bounds the complete handshake, including clients that send no bytes.
+        try:
+            request.do_handshake()
+        except OSError:
+            return
+        super().finish_request(request, client_address)
 
 
 def main():

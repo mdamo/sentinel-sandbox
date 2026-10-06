@@ -49,9 +49,16 @@ class Runtime:
                  topics: frozenset[str] = frozenset(),
                  endpoint_grants: dict[str, frozenset[str]] | None = None,
                  workflow_hosts: frozenset[str] = frozenset(),
+                 max_agent_admissions: int = 1024,
+                 max_run_admissions: int = 4096,
                  capability_only: bool = False):
         if not audit_key or len(audit_key) < 32 or not credentials:
             raise ValueError("credentials and >=32-byte audit key required")
+        if any(type(x) is not int or not 1 <= x <= 100000
+               for x in (max_agent_admissions, max_run_admissions)):
+            raise ValueError("admission limits must be integers between 1 and 100000")
+        self.max_agent_admissions = max_agent_admissions
+        self.max_run_admissions = max_run_admissions
         self.credentials = {}
         for token, identity in credentials.items():
             if len(token) < 32 or identity.swarm != swarm or identity.run != run:
@@ -81,13 +88,17 @@ class Runtime:
             endpoint_grants={k: sorted(v) for k, v in self.endpoint_grants.items()},
             baseline=capability_only, version=policy_version, swarm=swarm, run=run)
         # Dataclasses include frozensets/enum values. Stable configuration digest.
-        encoded = json.dumps(configuration, sort_keys=True,
-                             default=lambda x: sorted(x) if isinstance(x, (set, frozenset)) else str(x))
-        self.configuration = hashlib.sha256(encoded.encode()).hexdigest()
+        def digest(config):
+            encoded = json.dumps(config, sort_keys=True,
+                default=lambda x: sorted(x) if isinstance(x, (set, frozenset)) else str(x))
+            return hashlib.sha256(encoded.encode()).hexdigest()
+        legacy_configuration = digest(configuration)
+        configuration['admission_limits'] = [max_agent_admissions, max_run_admissions]
+        self.configuration = digest(configuration)
         state = store.load()
         if state is None:
             self.state = dict(configuration=self.configuration, run=run, swarm=swarm,
-                              requests={}, handles={}, contexts={}, files={}, next_action=1,
+                              requests={}, handles={}, contexts={}, files={}, admissions={}, next_action=1,
                               monitor=monitor.snapshot())
             self._commit(dict(event="run-created"))
         else:
@@ -95,10 +106,22 @@ class Runtime:
             expected = hmac.new(self.key, canonical(state).encode(), hashlib.sha256).hexdigest()
             if not hmac.compare_digest(signature, expected):
                 raise ValueError("security state signature invalid")
-            if state["configuration"] != self.configuration:
+            upgrade = (state["configuration"] == legacy_configuration and "admissions" not in state)
+            if state["configuration"] != self.configuration and not upgrade:
                 raise ValueError("database belongs to a different run or policy; explicit migration required")
             self.state = state
             monitor.restore(state["monitor"])
+            if upgrade:
+                # Tighten an authenticated legacy run in place, retaining all
+                # history, labels, budgets and retry records. Count old attempts.
+                state['configuration'] = self.configuration
+                state['admissions'] = {}
+                for body, in store.db.execute('SELECT body FROM audit ORDER BY seq'):
+                    event = json.loads(body)
+                    if event['event'] in {'reservation', 'denial', 'rejected', 'result-received'}:
+                        agent = event['agent']
+                        state['admissions'][agent] = state['admissions'].get(agent, 0) + 1
+                self._commit(dict(event='admission-limits-enabled'))
             pending = [v for v in state["requests"].values() if v["status"] == "pending"]
             for record in pending:
                 record["status"] = "uncertain"
@@ -114,7 +137,10 @@ class Runtime:
     def authenticate(self, token: str) -> Identity:
         if not isinstance(token, str):
             raise Rejected("authentication")
-        digest = hashlib.sha256(token.encode()).digest()
+        try:
+            digest = hashlib.sha256(token.encode()).digest()
+        except UnicodeError:
+            raise Rejected("authentication") from None
         # Constant-time compare even for unknown tokens; no credential values in exceptions.
         for expected, identity in self.credentials.items():
             if hmac.compare_digest(digest, expected):
@@ -144,6 +170,29 @@ class Runtime:
     def _attach(self, name, taints):
         self.state["contexts"][name] = sorted(self._context(name) | set(taints))
 
+    def _admit(self, identity):
+        """Bound all agent-generated durable growth, not just successful effects.
+
+        Caller holds the lock and commits this charge with the operation/rejection.
+        Once exhausted, fail without another row or state mutation. Never evict
+        retry records: eviction could authorize repeating an old external effect.
+        """
+        counts = self.state['admissions']
+        if (counts.get(identity.name, 0) >= self.max_agent_admissions or
+                sum(counts.values()) >= self.max_run_admissions):
+            return False
+        counts[identity.name] = counts.get(identity.name, 0) + 1
+        return True
+
+    def _reject(self, identity, rule, admitted=False):
+        if not admitted and not self._admit(identity):
+            return self.denied('admission-limit')
+        try:
+            self._commit(dict(event='rejected', agent=identity.name, rule=rule))
+        except Exception:
+            return self.denied('storage-unavailable')
+        return self.denied(rule)
+
     def _provenance(self, identity, dependencies):
         labels = self._context(identity.name)
         for handle in dependencies:
@@ -156,6 +205,21 @@ class Runtime:
     def _shape(self, body):
         if not isinstance(body, dict) or set(body) - {"agent_id", "request_id", "type", "params", "dependencies"}:
             raise Rejected("request-shape")
+        # JSON permits escaped lone surrogates; UTF-8 file/network adapters do not.
+        # Reject them before any reservation or security-state mutation.
+        pending = [body]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, str):
+                try:
+                    value.encode("utf-8")
+                except UnicodeError:
+                    raise Rejected("request-text") from None
+            elif isinstance(value, dict):
+                pending.extend(value.keys())
+                pending.extend(value.values())
+            elif isinstance(value, list):
+                pending.extend(value)
         rid = body.get("request_id")
         deps = body.get("dependencies", [])
         if (not isinstance(rid, str) or not 1 <= len(rid) <= 128 or
@@ -181,7 +245,7 @@ class Runtime:
         with self.lock:
             if not self.healthy:
                 return self.denied("storage-unavailable")
-            key = None
+            admitted = False
             try:
                 rid, kind, deps = self._shape(body)
                 if body.get("agent_id", identity.name) != identity.name:
@@ -196,6 +260,9 @@ class Runtime:
                     if previous["fingerprint"] != fingerprint:
                         raise Rejected("idempotency-conflict")
                     return dict(previous["response"], replay=True)
+                if not self._admit(identity):
+                    return self.denied('admission-limit')
+                admitted = True
                 p = self.adapters.validate(kind, body.get("params", {}))
                 taints = self._provenance(identity, deps)
                 if kind == ActionType.FILE_READ:
@@ -238,7 +305,9 @@ class Runtime:
                         taints.add("sensitive:http-response")
                     self._attach(identity.name, taints)
                     if kind == ActionType.FILE_WRITE:
-                        self.state["files"][p["path"]] = sorted(taints)
+                        # Labels are monotonic, including failed create-only writes.
+                        self.state["files"][p["path"]] = sorted(
+                            set(self.state["files"].get(p["path"], [])) | taints)
                     if kind == ActionType.BUS_PUBLISH:
                         self._attach(p["recipient"], taints)
                 self._commit(dict(event="reservation" if decision.allow else "denial",
@@ -250,11 +319,7 @@ class Runtime:
                     return dict(response, broker_ms=round((time.monotonic() - start) * 1000, 3))
                 broker_ms = round((time.monotonic() - start) * 1000, 3)
             except Rejected as exc:
-                try:
-                    self._commit(dict(event="rejected", agent=identity.name, rule=exc.rule))
-                except Exception:
-                    return self.denied("storage-unavailable")
-                return self.denied(exc.rule)
+                return self._reject(identity, exc.rule, admitted)
             except Exception:
                 self.healthy = False
                 return self.denied("storage-unavailable")
@@ -277,6 +342,11 @@ class Runtime:
                        broker_ms=broker_ms,
                        end_to_end_ms=round((time.monotonic() - start) * 1000, 3))
             if outcome == "completed":
+                if kind == ActionType.FILE_READ and not self.capability_only:
+                    # A concurrent writer may have labelled/created this path after
+                    # read admission. Persist the final labels before exposing data.
+                    taints.update(self.state["files"].get(p["path"], []))
+                    self._attach(identity.name, taints)
                 handle = secrets.token_urlsafe(32)
                 owner = p["recipient"] if kind == ActionType.BUS_PUBLISH else identity.name
                 self.state["handles"][handle] = dict(owner=owner, run=self.run,
@@ -305,9 +375,16 @@ class Runtime:
                     return self.denied("storage-unavailable")
                 if self.broker.monitor.quarantined or identity.name in self.broker.monitor.killed:
                     return self.denied("swarm-quarantined")
-                taints = self._provenance(identity, [handle])
-                if handle not in self.values:
-                    raise Rejected("result-unavailable")
+                if not self._admit(identity):
+                    return self.denied('admission-limit')
+                try:
+                    if not isinstance(handle, str) or len(handle) > 128:
+                        raise Rejected('request-shape')
+                    taints = self._provenance(identity, [handle])
+                    if handle not in self.values:
+                        raise Rejected("result-unavailable")
+                except Rejected as exc:
+                    return self._reject(identity, exc.rule, admitted=True)
                 if not self.capability_only:
                     self._attach(identity.name, taints)
                 self._commit(dict(event="result-received", agent=identity.name, handle=handle))

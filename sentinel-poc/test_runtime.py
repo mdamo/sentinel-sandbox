@@ -46,7 +46,8 @@ class LocalService(BaseHTTPRequestHandler):
 
 class Fixture:
     def __init__(self, *, capability_only=False, agent_bytes=100000, swarm_bytes=1000000,
-                 workflows=frozenset(), timeout=3):
+                 workflows=frozenset(), timeout=3, max_agent_admissions=1024,
+                 max_run_admissions=4096):
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name)
         self.root = self.base / "workspace"
@@ -74,6 +75,7 @@ class Fixture:
                        share_pairs=frozenset({("A", "B")}), topics=frozenset({"results"}),
                        endpoint_grants={a: frozenset(self.endpoints) for a in ("A", "B", "C")},
                        workflow_hosts=workflows, capability_only=capability_only)
+        self.kw.update(max_agent_admissions=max_agent_admissions, max_run_admissions=max_run_admissions)
         self.timeout = timeout
         self.runtime = None
         self.open()
@@ -110,6 +112,205 @@ class Fixture:
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_legacy_state_upgrade_preserves_security_and_retry_history(self):
+        import hashlib
+        import hmac
+        from dataclasses import asdict
+        from sentinel.storage import canonical
+        with Fixture() as f:
+            read = f.request(params={'path': 'secrets/key'}, rid='legacy-read')
+            f.request(params={'path': 'outside'})
+            # Configuration contract used by databases preceding admission limits.
+            legacy_config = dict(policy=asdict(f.policy),
+                endpoints={k: asdict(v) for k, v in f.endpoints.items()},
+                workspace_identity=list(os.fstat(f.runtime.adapters.root)[0:3]),
+                max_file=65536, timeout=f.timeout,
+                agent_budget=asdict(f.kw['per_agent']), swarm_budget=asdict(f.kw['per_swarm']),
+                pairs=sorted(f.kw['share_pairs']), topics=sorted(f.kw['topics']), workflows=[],
+                endpoint_grants={k: sorted(v) for k, v in f.kw['endpoint_grants'].items()},
+                baseline=False, version='test-v1', swarm='swarm', run='run')
+            encoded = json.dumps(legacy_config, sort_keys=True,
+                default=lambda x: sorted(x) if isinstance(x, (set, frozenset)) else str(x))
+            state = copy.deepcopy(f.runtime.state)
+            state.pop('admissions')
+            state.pop('signature')
+            state['configuration'] = hashlib.sha256(encoded.encode()).hexdigest()
+            state['signature'] = hmac.new(AUDIT_KEY, canonical(state).encode(), hashlib.sha256).hexdigest()
+            f.runtime.store.commit(state, {'event': 'legacy-fixture'})
+            f.restart()
+            self.assertEqual(f.runtime.state['admissions'], {'A': 2})
+            self.assertEqual(f.runtime.state['contexts'], state['contexts'])
+            self.assertEqual(f.runtime.state['monitor']['agents'], state['monitor']['agents'])
+            replay = f.request(params={'path': 'secrets/key'}, rid='legacy-read')
+            self.assertTrue(replay['replay'])
+            self.assertEqual(replay['handle'], read['handle'])
+            checkpoint = f.runtime.checkpoint(TOKENS['Z'])
+            f.restart()
+            self.assertEqual(f.runtime.checkpoint(TOKENS['Z']), checkpoint)
+            self.assertEqual(f.request(kind='net_send',
+                params={'endpoint': 'result', 'payload': 'synthetic'})['rule'], 'taint-egress')
+
+    def test_denied_and_invalid_requests_have_durable_growth_limits(self):
+        for mode in ('policy', 'shape', 'receive'):
+            with self.subTest(mode=mode), Fixture(max_agent_admissions=4) as f:
+                read = f.request(rid='retained')
+                for i in range(3):
+                    if mode == 'policy':
+                        out = f.request(params={'path': 'outside'}, rid=str(i))
+                    elif mode == 'shape':
+                        out = f.runtime.execute(TOKENS['A'], {})
+                    else:
+                        out = f.runtime.receive(TOKENS['A'], 'unknown')
+                    self.assertFalse(out['allow'])
+                snapshot = f.runtime.store.load()
+                audit = f.runtime.store.verify()
+                for i in range(30):
+                    self.assertEqual(f.request(rid='flood-' + str(i))['rule'], 'admission-limit')
+                    self.assertEqual(f.runtime.execute(TOKENS['A'], {})['rule'], 'admission-limit')
+                    self.assertEqual(f.runtime.receive(TOKENS['A'], read['handle'])['rule'], 'admission-limit')
+                self.assertEqual(f.runtime.store.load(), snapshot)
+                self.assertEqual(f.runtime.store.verify(), audit)
+                f.restart()
+                self.assertEqual(f.request()['rule'], 'admission-limit')
+                replay = f.request(rid='retained')
+                self.assertTrue(replay['replay'])
+                self.assertEqual(replay['handle'], read['handle'])
+                self.assertTrue(f.request('B')['allow'])
+
+    def test_run_admission_limit_is_atomic_and_preserves_retries(self):
+        with Fixture(max_agent_admissions=10, max_run_admissions=3) as f:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(lambda i: f.request(
+                    ('A', 'B', 'C')[i % 3], rid=str(i)), range(12)))
+            self.assertEqual(sum(x['allow'] for x in results), 3)
+            self.assertEqual(sum(f.runtime.state['admissions'].values()), 3)
+            audit = f.runtime.store.verify()
+            f.restart()
+            for i, out in enumerate(results):
+                again = f.request(('A', 'B', 'C')[i % 3], rid=str(i))
+                if out['allow']:
+                    self.assertTrue(again['replay'])
+                    self.assertEqual(again['handle'], out['handle'])
+                else:
+                    self.assertEqual(again['rule'], 'admission-limit')
+            self.assertEqual(f.runtime.store.verify(), audit)
+
+    def test_unix_idle_and_dripping_requests_release_handlers(self):
+        import http.client
+        import socket
+        class QueuedUnixServer(UnixServer):
+            request_queue_size = 32  # Exercise worker exhaustion, not listen backlog.
+        with Fixture() as f:
+            path = str(f.base / 'deadlines.sock')
+            server = QueuedUnixServer(path, Handler)
+            server.runtime, server.request_timeout = f.runtime, .25
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            clients = []
+            def connect():
+                c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                c.settimeout(2)
+                c.connect(path)
+                clients.append(c)
+                return c
+            try:
+                for _ in range(16):
+                    connect()
+                time.sleep(.5)
+                connection = http.client.HTTPConnection('localhost', timeout=2)
+                connection.sock = connect()
+                connection.request('POST', '/execute', json.dumps(dict(
+                    request_id='after-idle', type='file_read', params={'path': 'work/input/public'})),
+                    {'Authorization': 'Bearer ' + TOKENS['A']})
+                self.assertTrue(json.loads(connection.getresponse().read())['allow'])
+                connection.close()
+                for initial in (b'POST /execute HTTP/1.0\r\nX-Header: ',
+                                b'POST /execute HTTP/1.0\r\nContent-Length: 1000\r\n\r\n'):
+                    c = connect()
+                    c.sendall(initial)
+                    stop = threading.Event()
+                    def drip():
+                        while not stop.wait(.03):
+                            try:
+                                c.sendall(b'x')
+                            except OSError:
+                                return
+                    dripper = threading.Thread(target=drip)
+                    dripper.start()
+                    start = time.monotonic()
+                    try:
+                        try:
+                            self.assertEqual(c.recv(1), b'')
+                        except ConnectionResetError:
+                            pass
+                        self.assertLess(time.monotonic() - start, 1.5)
+                    finally:
+                        stop.set()
+                        dripper.join()
+            finally:
+                for c in clients:
+                    c.close()
+                server.shutdown()
+                server.server_close()
+                thread.join()
+
+    def test_read_admitted_before_sensitive_create_labels_result(self):
+        with Fixture() as f:
+            f.request('A', params={'path': 'secrets/key'})
+            started, release = threading.Event(), threading.Event()
+            perform = f.runtime.adapters.perform
+            def delayed(kind, params):
+                if kind == ActionType.FILE_READ and params['path'] == 'work/tmp/race':
+                    started.set()
+                    self.assertTrue(release.wait(3))
+                return perform(kind, params)
+            f.runtime.adapters.perform = delayed
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                future = pool.submit(f.request, 'B', params={'path': 'work/tmp/race'})
+                try:
+                    self.assertTrue(started.wait(3))
+                    self.assertTrue(f.request('A', 'file_write',
+                        {'path': 'work/tmp/race', 'payload': 'synthetic sensitive'})['allow'])
+                finally:
+                    release.set()
+                read = future.result()
+            self.assertEqual(read['result']['data'], 'synthetic sensitive')
+            self.assertTrue(f.runtime.state['handles'][read['handle']]['taints'])
+            f.restart()
+            self.assertEqual(f.request('B', 'net_send',
+                {'endpoint': 'result', 'payload': read['result']['data']})['rule'], 'taint-egress')
+            self.assertEqual(f.http.received, [])
+
+    def test_failed_public_write_preserves_sensitive_file_label(self):
+        with Fixture() as f:
+            f.request('A', params={'path': 'secrets/key'})
+            f.request('A', 'file_write', {'path': 'work/tmp/shared', 'payload': 'sensitive'})
+            labels = list(f.runtime.state['files']['work/tmp/shared'])
+            self.assertFalse(f.request('B', 'file_write',
+                {'path': 'work/tmp/shared', 'payload': 'public'})['allow'])
+            self.assertEqual(f.runtime.state['files']['work/tmp/shared'], labels)
+            self.assertTrue(f.runtime.resume(TOKENS['Z'], 'reviewed file collision', f.incident())['allow'])
+            f.restart()
+            read = f.request('C', params={'path': 'work/tmp/shared'})
+            self.assertEqual(read['result']['data'], 'sensitive')
+            self.assertEqual(f.request('C', 'net_send',
+                {'endpoint': 'result', 'payload': read['result']['data']})['rule'], 'taint-egress')
+            self.assertEqual(f.http.received, [])
+
+    def test_invalid_unicode_is_request_local(self):
+        with Fixture() as f:
+            for kind, params in (
+                ('file_write', {'path': 'work/tmp/x', 'payload': '\ud800'}),
+                ('file_read', {'path': 'work/input/\udfff'}),
+                ('net_send', {'endpoint': 'result', 'payload': '\ud800'}),
+                ('bus_publish', {'recipient': 'B', 'topic': 'results', 'payload': '\ud800'})):
+                body = json.loads(json.dumps(dict(request_id=str(time.monotonic_ns()), type=kind, params=params)))
+                self.assertEqual(f.runtime.execute(TOKENS['A'], body)['rule'], 'request-text')
+                self.assertTrue(f.runtime.healthy)
+                self.assertTrue(f.request('B')['allow'])
+            self.assertEqual(f.runtime.execute('\ud800', {})['rule'], 'authentication')
+            self.assertEqual(f.http.received, [])
+
     def test_real_benign_read_transform_send(self):
         with Fixture() as f:
             read = f.request()
@@ -299,10 +500,12 @@ class RuntimeTests(unittest.TestCase):
             f.request(kind="net_send", params={"endpoint": "result", "payload": "x"})
             incident = f.incident()
             count = f.runtime.broker.monitor._swarm.requests
+            admissions = dict(f.runtime.state['admissions'])
             self.assertEqual(f.runtime.resume(TOKENS["A"], "reason", incident)["rule"], "admin-role-required")
             self.assertEqual(f.runtime.resume(TOKENS["Z"], "", incident)["rule"], "review-required")
             self.assertTrue(f.runtime.resume(TOKENS["Z"], "reviewed fixture incident", incident)["allow"])
             self.assertEqual(f.runtime.broker.monitor._swarm.requests, count)
+            self.assertEqual(f.runtime.state['admissions'], admissions)
             f.restart()
             self.assertEqual(f.request(kind="net_send", params={"endpoint": "result", "payload": "x"})["rule"], "taint-egress")
             self.assertEqual(f.http.received, [])
@@ -425,6 +628,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_tls_service_and_verified_pinned_https_adapter(self):
         import http.client
+        import socket
         import shutil
         import ssl
         import subprocess
@@ -439,12 +643,15 @@ class RuntimeTests(unittest.TestCase):
             context.load_cert_chain(cert, key)
             server = TLSServer(("127.0.0.1", 0), Handler)
             server.context, server.runtime = context, f.runtime
+            server.request_timeout = 2
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
+            idle_handshake = socket.create_connection(('127.0.0.1', server.server_port), timeout=2)
             try:
+                time.sleep(.05)
                 body = json.dumps(dict(request_id="tls", type="file_read", params={"path": "work/input/public"}))
                 client = http.client.HTTPSConnection("127.0.0.1", server.server_port,
-                                                    context=ssl.create_default_context(cafile=cert), timeout=3)
+                                                    context=ssl.create_default_context(cafile=cert), timeout=1)
                 client.request("POST", "/execute", body, {"Authorization": "Bearer " + TOKENS["A"]})
                 self.assertTrue(json.loads(client.getresponse().read())["allow"])
                 client.close()
@@ -453,6 +660,7 @@ class RuntimeTests(unittest.TestCase):
                     untrusted.request("POST", "/execute", body)
                 untrusted.close()
             finally:
+                idle_handshake.close()
                 server.shutdown()
                 server.server_close()
                 thread.join()
