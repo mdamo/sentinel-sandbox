@@ -18,15 +18,15 @@ but not sufficient, so the sentinel adds stateful, swarm-aware checks on top.
 
 ## Safety framing — DO NOT BREAK THIS
 
-This is defensive tooling plus a test harness. **Actions perform no real file,
-tool, or outbound network effects and nothing contains an exploit.** The
-microVM launcher configures a local TAP/firewall and the guest sends action
-records to the host sentinel. The "attacks" in `swarm/scenarios.py` remain
-abstract action records, NOT working attack code.
+This is defensive tooling plus a test harness. The local demo performs no
+effects. The HTTP host adapter performs confined file reads/writes and appends
+local outbox/bus records; it opens no outbound socket or subprocess. The
+microVM launcher configures a local TAP/firewall. The "attacks" in
+`swarm/scenarios.py` remain abstract action records, NOT working attack code.
 
 If asked to extend the attack scenarios, keep them at the same abstract level —
 add new `Action` shapes and expected-deny rules, never real exploit code, real
-network calls, or real credential handling. The value is in showing the sentinel
+network calls, or embedded credentials. The value is in showing the sentinel
 *denies* the pattern, not in demonstrating the exploit.
 
 ## Architecture (data flow)
@@ -46,12 +46,14 @@ agent → Action (typed intent) → Broker.submit()
 | `sentinel/response.py` | `ResponseMode`, `ResponsePolicy`, `Alert`. Maps a fired rule → escalation (deny / kill agent / quarantine swarm). |
 | `sentinel/broker.py` | Single enforcement point + hash-chained `AuditLog` (`verify()`). Complete mediation. |
 | `sentinel/serve.py` | Stdlib HTTP front end on the Linux host. |
+| `sentinel/identity.py` | Signed requests and replay checks with per-agent keys. |
+| `sentinel/effects.py` | Confined host file effects and local send/bus records. |
 | `swarm/catalog.py` | Shared six-agent roster and six tool names. |
 | `swarm/ai_agents.py` | Model proposal interface, offline backend, and mediated tools. |
 | `swarm/scenarios.py` | Abstract benign + misbehaving agent behaviours. |
 | `swarm/agent_client.py` | In-guest agent that POSTs actions to the sentinel. |
 | `run_demo.py` | End-to-end demo with audit log + verdict table. |
-| `test_sentinel.py` | One assertion per pattern. 19 tests. |
+| `test_sentinel.py` | Pattern, omitted-provenance, and authenticated HTTP effect checks. 23 tests. |
 | `deploy/microvm/` | Firecracker guest builder, Linux host launcher, and boot integration test; no Docker runtime. |
 
 ## Invariants — must stay true after any change
@@ -77,10 +79,10 @@ agent → Action (typed intent) → Broker.submit()
    the README tables, and any `ResponsePolicy` mapping in the same change.
    The audit log is hash-chained: never mutate a past `AuditEntry`; `verify()`
    must stay true for an untampered run.
-6. **Taint follows data.** Reads of `sensitive_prefixes` attach a `sensitive:`
-   taint; it propagates through `Action.derived_from`; any outbound action
-   carrying it is denied by `taint-egress`. Don't drop the propagation in
-   `Monitor._inherited_taint` / `record_result`.
+6. **Taint follows data and agent history.** Reads of `sensitive_prefixes`
+   attach a `sensitive:` taint; it propagates through `Action.derived_from` and
+   persists on the agent identity, so omitted provenance cannot clear it for
+   that agent. Any outbound action carrying it is denied by `taint-egress`.
 7. **The host-side sentinel stays stdlib-only.** It guards everything, so it
    must stay small and auditable. The guest image is read-only and the guest
    agent runs as an unprivileged UID. Host network rules must continue to deny
@@ -97,18 +99,17 @@ agent → Action (typed intent) → Broker.submit()
 
 ```bash
 cd sentinel-poc
-python3.13 run_demo.py    # expect: ALL SCENARIOS BEHAVED AS EXPECTED, 7 denied,
+python3.13 run_demo.py    # expect: ALL SCENARIOS BEHAVED AS EXPECTED, 6 denied,
                           #         audit chain verifies: True, quarantine demo
-python3.13 test_sentinel.py # expect: 19/19 tests passed   (pytest also works)
+python3.13 test_sentinel.py # expect: 23/23 tests passed   (pytest also works)
 
-# two-process HTTP check (proves mediation across a boundary):
-SENTINEL_BIND=127.0.0.1:8085 python3.13 -m sentinel.serve &
-BROKER_URL=http://127.0.0.1:8085/submit python3.13 -m swarm.agent_client
+# test_sentinel.py includes an HTTP boundary test with signed requests and effects.
 
 # microVM (requires a Linux KVM host, Firecracker, guest kernel, and rootfs):
-sudo deploy/microvm/build-rootfs.sh /path/to/agent.ext4
-sudo KERNEL_IMAGE=/path/to/vmlinux ROOTFS_IMAGE=/path/to/agent.ext4 deploy/microvm/run.sh
-sudo KERNEL_IMAGE=/path/to/vmlinux ROOTFS_IMAGE=/path/to/agent.ext4 deploy/microvm/test-boot.sh
+# Create SENTINEL_KEYS_FILE as documented in README; use the same file throughout.
+sudo SENTINEL_KEYS_FILE=/path/to/keys.json deploy/microvm/build-rootfs.sh /path/to/agent.ext4
+sudo SENTINEL_KEYS_FILE=/path/to/keys.json KERNEL_IMAGE=/path/to/vmlinux ROOTFS_IMAGE=/path/to/agent.ext4 deploy/microvm/run.sh
+sudo SENTINEL_KEYS_FILE=/path/to/keys.json KERNEL_IMAGE=/path/to/vmlinux ROOTFS_IMAGE=/path/to/agent.ext4 deploy/microvm/test-boot.sh
 ```
 
 **Always run both `run_demo.py` and `test_sentinel.py` after a change** and
@@ -121,13 +122,16 @@ confirm the counts above before claiming it works.
   KVM, and firewall remain trusted.
 - Deterministic means it only catches specified patterns; the correlation rules
   are illustrative and need a tuned, reviewed catalogue in production.
-- Taint tracking relies on honest `derived_from`; production needs the adapter
-  to attach provenance so an agent can't omit it.
+- Agent-history taint blocks omitted provenance for the same identity, at the
+  cost of denying later clean outbound work. HTTP identity is authenticated,
+  but cross-agent provenance is still self-declared. Keys in a shared guest
+  would need per-agent isolation; replay state is currently in memory.
 
 ## Conventions
 
 - Python 3.13, standard library only. No runtime third-party deps.
 - Dataclasses for state; `Enum` for action types.
-- Keep `policy.py` stateless and `monitor.py` the only place with mutable state.
+- Keep `policy.py` stateless. Monitor state, HTTP replay state, and broker
+  serialization are separate; don't bypass their locks at the HTTP boundary.
 - When adding a pattern: add the abstract scenario, add a handler/rule if needed,
   add a test asserting the exact `rule`, update both README tables and this file.

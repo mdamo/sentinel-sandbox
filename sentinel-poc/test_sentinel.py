@@ -63,6 +63,35 @@ def test_laundered_flow_denied_by_taint():
     assert d.deny and d.rule == "taint-egress"
 
 
+def test_omitted_provenance_cannot_clear_sensitive_read():
+    b = _broker()
+    assert b.submit(Action("A", ActionType.FILE_READ,
+                           {"path": "/secrets/key"})).allow
+    # The agent deliberately omits both provenance edges.
+    assert b.submit(Action("A", ActionType.FILE_WRITE,
+                           {"path": "/work/tmp/enc", "payload": "enc"})).allow
+    d = b.submit(Action("A", ActionType.NET_SEND,
+                        {"host": "ok.host", "payload": "enc"}))
+    assert d.deny and d.rule == "taint-egress"
+    assert b.audit.verify()
+    # The restriction belongs to A; an agent without a sensitive read can send.
+    assert b.submit(Action("B", ActionType.NET_SEND,
+                           {"host": "ok.host", "payload": "clean"})).allow
+
+
+def test_omitted_provenance_blocks_every_outbound_channel():
+    for action_type, params in (
+        (ActionType.NET_SEND, {"host": "ok.host", "payload": "x"}),
+        (ActionType.DNS_RESOLVE, {"host": "ok.host"}),
+        (ActionType.BUS_PUBLISH, {"payload": "x"}),
+    ):
+        b = _broker()
+        assert b.submit(Action("A", ActionType.FILE_READ,
+                               {"path": "/secrets/key"})).allow
+        d = b.submit(Action("A", action_type, params, derived_from=[]))
+        assert d.deny and d.rule == "taint-egress"
+
+
 def test_dns_covert_denied():
     b = _broker()
     d = b.submit(Action("A", ActionType.DNS_RESOLVE, {"host": "data.evil.zone"}))
@@ -209,6 +238,17 @@ def test_ai_tools_preserve_taint_provenance():
     assert decision.deny and decision.rule == "taint-egress"
 
 
+def test_ai_tool_cannot_launder_by_omitting_provenance():
+    from run_demo import build_sentinel
+    from swarm.ai_agents import ToolCall, ToolRegistry
+    b = build_sentinel()
+    tools = ToolRegistry(b)
+    assert tools.submit("agent-1", ToolCall("read_file", {"path": "/secrets/key"}))[1].allow
+    _, decision = tools.submit("agent-1", ToolCall(
+        "send_result", {"host": "api.internal.svc", "payload": "secret"}))
+    assert decision.deny and decision.rule == "taint-egress"
+
+
 def test_http_roster_has_exactly_six_agents():
     from sentinel.serve import default_broker
     from swarm.catalog import AGENT_ROLES
@@ -216,6 +256,100 @@ def test_http_roster_has_exactly_six_agents():
     assert set(b.policy.capabilities) == set(AGENT_ROLES)
     decision = b.submit(Action("agent-7", ActionType.FILE_READ, {"path": "/work/x"}))
     assert decision.deny and decision.rule == "no-capability"
+
+
+def test_authenticated_http_effects_and_impersonation():
+    import json
+    import os
+    import tempfile
+    import threading
+    import urllib.request
+    from pathlib import Path
+    from sentinel.effects import EffectAdapter
+    from sentinel.identity import IdentityStore, signed_headers
+    from sentinel.serve import SentinelHTTPServer, default_broker
+    from swarm import agent_client
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "work/input").mkdir(parents=True)
+        (root / "work/input/task.json").write_text("hello")
+        (root / "secrets").mkdir()
+        (root / "secrets/key").write_text("secret")
+        key_a, key_b = b"a" * 32, b"b" * 32
+        server = SentinelHTTPServer(("127.0.0.1", 0), default_broker(),
+                                    IdentityStore({"agent-1": key_a, "agent-2": key_b}),
+                                    EffectAdapter(root))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        client_key = root / "agent.key"
+        client_key.write_text(key_b.hex())
+
+        def post(claimed, key, body, headers=None):
+            raw = json.dumps(body).encode()
+            auth = headers or signed_headers(claimed, key, raw)
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/submit", data=raw,
+                headers={"Content-Type": "application/json", **auth})
+            return json.loads(urllib.request.urlopen(request, timeout=2).read())
+
+        try:
+            read = post("agent-1", key_a,
+                        {"type": "file_read", "params": {"path": "/secrets/key"}})
+            assert read["allow"] and read["result"]["content"] == "secret"
+            spoof = post("agent-2", key_a,
+                         {"type": "net_send", "params": {"host": "api.internal.svc",
+                                                          "payload": "stolen"}})
+            assert not spoof["allow"] and spoof["rule"] == "identity-auth"
+            mismatch = post("agent-1", key_a,
+                            {"agent_id": "agent-2", "type": "net_send",
+                             "params": {"host": "api.internal.svc", "payload": "stolen"}})
+            assert not mismatch["allow"] and mismatch["rule"] == "identity-auth"
+            clean = post("agent-2", key_b,
+                         {"type": "file_write", "params": {"path": "/work/tmp/result",
+                                                           "payload": "written"}})
+            assert clean["allow"] and (root / "work/tmp/result").read_text() == "written"
+            old_broker = agent_client.BROKER
+            old_key_file = os.environ.get("AGENT_KEY_FILE")
+            try:
+                agent_client.BROKER = f"http://127.0.0.1:{server.server_port}/submit"
+                os.environ["AGENT_KEY_FILE"] = str(client_key)
+                via_client = agent_client.submit("agent-2", "file_read",
+                                                 path="/work/input/task.json")
+                assert via_client["allow"] and via_client["result"]["content"] == "hello"
+            finally:
+                agent_client.BROKER = old_broker
+                if old_key_file is None:
+                    os.environ.pop("AGENT_KEY_FILE", None)
+                else:
+                    os.environ["AGENT_KEY_FILE"] = old_key_file
+            (root / "work/tmp/link").symlink_to(root / "secrets/key")
+            escape = post("agent-2", key_b,
+                          {"type": "file_write", "params": {"path": "/work/tmp/link",
+                                                            "payload": "overwrite"}})
+            assert not escape["allow"] and (root / "secrets/key").read_text() == "secret"
+            raw = json.dumps({"type": "net_send", "params": {
+                "host": "api.internal.svc", "payload": "ok"}}).encode()
+            headers = signed_headers("agent-2", key_b, raw)
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/submit", data=raw,
+                headers={"Content-Type": "application/json", **headers})
+            first = json.loads(urllib.request.urlopen(request, timeout=2).read())
+            replay = json.loads(urllib.request.urlopen(request, timeout=2).read())
+            assert first["allow"] and not replay["allow"]
+            assert replay["rule"] == "identity-auth"
+            assert len((root / "outbox.jsonl").read_text().splitlines()) == 1
+            denied = post("agent-1", key_a,
+                          {"type": "net_send", "params": {"host": "api.internal.svc",
+                                                           "payload": "stolen"},
+                           "derived_from": []})
+            assert not denied["allow"] and denied["rule"] == "taint-egress"
+            assert len((root / "outbox.jsonl").read_text().splitlines()) == 1
+            assert server.broker.audit.verify()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
 
 if __name__ == "__main__":

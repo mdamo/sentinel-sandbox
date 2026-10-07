@@ -9,16 +9,18 @@ Enforcement order, mediating every call (complete mediation):
     2. stateful monitor (allow given everything seen so far, per-agent + swarm?)
     3. only if both allow is the action considered authorized.
 
-The broker never executes anything. It returns the Decision. A real adapter
-would perform the effect only on an allow; on a deny nothing happens. Every
-decision is appended to a tamper-evident-style audit log (out-of-band in prod).
+The broker can invoke a trusted adapter only after an allow. The local demo
+uses submit() without an adapter; the HTTP server uses execute() with its
+host-owned adapter. Every final decision is appended to the audit log.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from dataclasses import dataclass, field
+from typing import Callable
 
 from .actions import Action, Decision
 from .monitor import Monitor
@@ -102,12 +104,26 @@ class Broker:
         self.monitor = monitor
         self.audit = AuditLog()
         self.fail_closed = True
+        self._lock = threading.Lock()
 
     def submit(self, action: Action) -> Decision:
+        return self.execute(action)[0]
+
+    def execute(self, action: Action,
+                effect: Callable[[Action], dict] | None = None) -> tuple[Decision, dict | None]:
+        """Serialize review and host effect; audit the final outcome."""
+        with self._lock:
+            return self._execute_locked(action, effect)
+
+    def _execute_locked(self, action: Action,
+                        effect: Callable[[Action], dict] | None) -> tuple[Decision, dict | None]:
+        result = None
         try:
             policy_decision = self.policy.evaluate(action)
             decision = self.monitor.review(action, policy_decision)
             if decision.allow:
+                if effect is not None:
+                    result = effect(action)
                 self.monitor.record_result(action, decision)
         except Exception as exc:  # any internal fault -> deny, never allow
             if not self.fail_closed:
@@ -115,7 +131,7 @@ class Broker:
             decision = Decision(False, "fail-closed",
                                 f"sentinel internal error, denying: {exc!r}")
         self.audit.append(action, decision)
-        return decision
+        return decision, result
 
     # convenience for stats / tests
     def denials(self) -> list[AuditEntry]:

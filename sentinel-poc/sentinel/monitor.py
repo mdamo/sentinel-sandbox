@@ -74,6 +74,9 @@ class Monitor:
         self._swarm = _Counters()
         # taint label set carried by each past action's returned data
         self._taint_by_action: dict[int, set[str]] = {}
+        # An untrusted agent can omit derived_from. Keep sensitive taint on its
+        # identity so an omitted edge cannot turn a later outbound call clean.
+        self._taint_by_agent: dict[str, set[str]] = defaultdict(set)
         # provenance edges: action id -> the ids it was derived from
         self._prov: dict[int, list[int]] = {}
         # for split-payload correlation: dest -> set of agents that sent to it
@@ -100,6 +103,8 @@ class Monitor:
         """Called after an allowed action to remember its taint + provenance."""
         taint = set(decision.taints) | self._inherited_taint(action)
         self._taint_by_action[action.id] = taint
+        self._taint_by_agent[action.agent_id].update(
+            t for t in taint if t.startswith("sensitive:"))
         self._prov[action.id] = list(action.derived_from)
 
     # ---- response / escalation -------------------------------------------
@@ -141,7 +146,8 @@ class Monitor:
         if policy_decision.deny:
             return policy_decision
 
-        taint = set(policy_decision.taints) | self._inherited_taint(action)
+        taint = (set(policy_decision.taints) | self._inherited_taint(action)
+                 | self._taint_by_agent[action.agent_id])
 
         outbound = action.type in (ActionType.NET_SEND, ActionType.DNS_RESOLVE,
                                    ActionType.BUS_PUBLISH)
@@ -150,7 +156,7 @@ class Monitor:
         if outbound and any(t.startswith("sensitive:") for t in taint):
             return Decision(False, "taint-egress",
                             f"outbound action carries sensitive taint {sorted(taint)} "
-                            f"(laundered through {action.derived_from}) — blocked")
+                            f"(declared sources {action.derived_from}; agent history checked) — blocked")
 
         # 2) budgets, per-agent and per-swarm.
         add_bytes = action.size() if outbound else 0

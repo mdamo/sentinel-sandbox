@@ -99,10 +99,11 @@ def main() -> int:
     # split_role: agent-1 probes a host (denied at DNS), but suppose DNS were
     # permitted for a shared zone — model the staging explicitly on a permitted
     # host: agent-1 resolves, agent-2 sends.
-    broker.submit(Action("agent-1", ActionType.DNS_RESOLVE, {"host": "api.internal.svc"}))
-    d = broker.submit(Action("agent-2", ActionType.NET_SEND,
+    split_role_broker = build_sentinel()
+    split_role_broker.submit(Action("agent-1", ActionType.DNS_RESOLVE, {"host": "api.internal.svc"}))
+    d = split_role_broker.submit(Action("agent-2", ActionType.NET_SEND,
                              {"host": "api.internal.svc", "payload": "x"}))
-    verdicts.append(("split_role", d.deny and broker.audit[-1].decision.rule == "corr-split-role"))
+    verdicts.append(("split_role", d.deny and d.rule == "corr-split-role"))
 
     # split_payload: three *more* distinct agents each send a slice to one dest.
     broker2 = build_sentinel()

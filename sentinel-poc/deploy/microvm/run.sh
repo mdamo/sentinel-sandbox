@@ -26,6 +26,10 @@ if [[ -z $kernel || -z $rootfs || ! -f $kernel || ! -f $rootfs ]]; then
     echo 'Set KERNEL_IMAGE and ROOTFS_IMAGE to existing guest images.' >&2
     exit 1
 fi
+if [[ -z ${SENTINEL_KEYS_FILE:-} || ! -f ${SENTINEL_KEYS_FILE:-} ]]; then
+    echo 'Set SENTINEL_KEYS_FILE to the same host JSON key map used to build the guest.' >&2
+    exit 1
+fi
 for tool in firecracker nft ip python3.13; do
     command -v "$tool" >/dev/null || { echo "Missing $tool" >&2; exit 1; }
 done
@@ -40,8 +44,12 @@ fi
 
 kernel=$(realpath "$kernel")
 rootfs=$(realpath "$rootfs")
+SENTINEL_KEYS_FILE=$(realpath "$SENTINEL_KEYS_FILE")
+export SENTINEL_KEYS_FILE
 workdir=$(mktemp -d)
 trap cleanup EXIT INT TERM
+mkdir -p "$workdir/effects/work/input" "$workdir/effects/work/tmp"
+printf '%s\n' '{"task":"result ok"}' > "$workdir/effects/work/input/task.json"
 echo "[microVM | host] preparing Firecracker kernel=$kernel rootfs=$rootfs vcpus=1 memory=256MiB"
 
 ip tuntap add dev "$tap" mode tap
@@ -59,7 +67,8 @@ nft add rule inet "$table" forward iifname "$tap" drop
 echo "[network | host] tap=$tap host=172.16.0.1 guest=172.16.0.2; guest access limited to sentinel TCP/8085"
 
 cd "$project_dir"
-SENTINEL_BIND=172.16.0.1:8085 python3.13 -m sentinel.serve &
+SENTINEL_BIND=172.16.0.1:8085 SENTINEL_EFFECT_ROOT="$workdir/effects" \
+    python3.13 -m sentinel.serve &
 sentinel_pid=$!
 echo "[sentinel | host] launched pid=$sentinel_pid; waiting for service ready log"
 
