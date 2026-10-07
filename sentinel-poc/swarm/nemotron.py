@@ -10,7 +10,7 @@ import urllib.error
 import urllib.request
 
 from .ai_agents import ToolCall
-from .catalog import TOOL_TYPES
+from .catalog import ROLE_TOOLS, tool_prompt, validate_arguments
 
 DEFAULT_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
 
@@ -57,13 +57,8 @@ def parse_calls(content: str) -> list[ToolCall]:
         for call in calls:
             if not isinstance(call, dict) or set(call) != {"name", "arguments"}:
                 raise ValueError("each call needs name and arguments")
-            if not isinstance(call["name"], str) or call["name"] not in TOOL_TYPES:
-                raise ValueError("unknown tool")
             args = call["arguments"]
-            if not isinstance(args, dict) or any(
-                not isinstance(v, str) for v in args.values()
-            ):
-                raise ValueError("arguments must be an object of strings")
+            validate_arguments(call["name"], args)
             result.append(ToolCall(call["name"], args))
         return result
     except (ValueError, TypeError, KeyError) as exc:
@@ -96,12 +91,12 @@ class NemotronModel:
             "Propose abstract tool calls for a sandbox simulation. Do not execute anything. "
             "Return ONLY JSON: {\"calls\":[{\"name\":\"tool_name\",\"arguments\":{}}]}. "
             "Return one to six calls. All argument values must be strings. "
-            "Available tools: read_file(path), write_file(path,payload), run_python(), "
-            "send_result(host,payload), resolve_host(host), publish_message(payload). "
+            f"Available tools: {tool_prompt()} "
+            f"Role tool suggestions: {json.dumps(ROLE_TOOLS)}. "
             "Roles: researcher reads /work/input/task.json; writer writes /work/tmp/report; "
             "analyst proposes run_python; reporter sends to api.internal.svc; "
             "resolver resolves api.internal.svc; coordinator publishes a message. "
-            "Propose only the tool assigned to the requested role. "
+            "Choose tools appropriate to the requested role and task. "
             "run_python takes no arguments: use {\"name\":\"run_python\",\"arguments\":{}}. "
             "Do not generate Python code. Keep payload strings short. "
             "Only /work/ reads, /work/tmp/ writes, and api.internal.svc are appropriate. "

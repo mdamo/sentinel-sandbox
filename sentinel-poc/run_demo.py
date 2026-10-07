@@ -16,7 +16,7 @@ from sentinel import (Broker, Budget, Capability, Monitor, Policy,
 from sentinel.actions import ActionType
 from sentinel.response import Alert
 from swarm import scenarios
-from swarm.catalog import AGENT_ROLES, TOOL_BINARIES
+from swarm.catalog import AGENT_ROLES, TOOL_BINARIES, TOOL_TYPES
 from swarm.ai_agents import ToolRegistry, build_ai_agents
 
 
@@ -32,7 +32,7 @@ def build_sentinel(response: ResponsePolicy | None = None) -> Broker:
     )
 
     # Every agent gets the SAME narrow grant: read own work + secrets dir,
-    # write only to its temp scratch, run python, reach exactly one internal
+    # write only to its temp scratch, propose fixed tools, reach one internal
     # host. Default-deny means anything not listed is refused.
     base = dict(
         allowed_types=frozenset({
@@ -61,13 +61,14 @@ def build_sentinel(response: ResponsePolicy | None = None) -> Broker:
 def main() -> int:
     ai_broker = build_sentinel()
     tools = ToolRegistry(ai_broker)
-    print("AI AGENT SWARM — 6 agents, 6 tools (offline simulation backend)")
+    print(f"AI AGENT SWARM — 6 agents, {len(TOOL_TYPES)} tools (offline simulation backend)")
     ai_ok = True
     for agent in build_ai_agents():
         for action, decision in agent.run("result ok", tools):
             print(f"  {agent.agent_id} ({agent.role}): {action.type.value} -> {decision.rule}")
             ai_ok &= decision.allow
     ai_ok &= ai_broker.audit.verify()
+    ai_ok &= len(ai_broker.audit) == len(TOOL_TYPES)
     broker = build_sentinel()
 
     plan = [

@@ -204,12 +204,12 @@ def test_six_ai_agents_and_tools_are_mediated():
     from swarm.catalog import TOOL_TYPES
     b = build_sentinel()
     agents = build_ai_agents()
-    assert len(agents) == 6 and len(TOOL_TYPES) == 6
+    assert len(agents) == 6 and len(TOOL_TYPES) == 20
     results = [result for agent in agents
                for result in agent.run("result ok", ToolRegistry(b))]
     assert {action.type.value for action, _ in results} == set(TOOL_TYPES.values())
     assert all(decision.allow for _, decision in results)
-    assert len(b.audit) == 6 and b.audit.verify()
+    assert len(b.audit) == 20 and b.audit.verify()
 
 
 def test_ai_model_cannot_override_sentinel():

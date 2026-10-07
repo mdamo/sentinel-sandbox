@@ -10,7 +10,8 @@ from typing import Any, Protocol
 
 from sentinel.actions import Action, ActionType, Decision
 from sentinel.broker import Broker
-from .catalog import AGENT_ROLES, TOOL_TYPES
+from .catalog import AGENT_ROLES, ROLE_TOOLS, TOOL_SPECS, TRANSFORM_TOOLS, validate_arguments
+from .transforms import perform_transform
 
 
 @dataclass(frozen=True)
@@ -30,32 +31,49 @@ class OfflineModel:
     """Explicit simulation for reproducible runs without credentials."""
 
     def propose(self, role: str, task: str) -> list[ToolCall]:
-        calls = {
-            "researcher": ToolCall("read_file", {"path": "/work/input/task.json"}),
-            "writer": ToolCall("write_file", {"path": "/work/tmp/report", "payload": task}),
-            "analyst": ToolCall("run_python"),
-            "reporter": ToolCall("send_result", {"host": "api.internal.svc", "payload": task}),
-            "resolver": ToolCall("resolve_host", {"host": "api.internal.svc"}),
-            "coordinator": ToolCall("publish_message", {"payload": task}),
-        }
-        return [calls[role]]
+        calls = []
+        for name in ROLE_TOOLS[role]:
+            arguments = dict(TOOL_SPECS[name].example)
+            if "payload" in arguments:
+                arguments["payload"] = task
+            calls.append(ToolCall(name, arguments))
+        return calls
 
 
 class ToolRegistry:
-    """Six named tools, all routed through Broker.submit; no effect executor."""
+    """Twenty mediated tools; submit intents or execute fixed in-memory utilities.
+
+    The original six tools remain abstract in this local registry. Real external
+    effects belong to the separately authenticated HTTP/execution services.
+    """
 
     def __init__(self, broker: Broker):
         self.broker = broker
 
-    def submit(self, agent_id: str, call: ToolCall) -> tuple[Action, Decision]:
-        if call.name not in TOOL_TYPES:
-            raise ValueError(f"unknown tool: {call.name}")
+    def _action(self, agent_id: str, call: ToolCall) -> Action:
+        validate_arguments(call.name, call.arguments)
         params = dict(call.arguments)
-        if call.name == "run_python":
-            params["tool"] = "python"
-        action = Action(agent_id, ActionType(TOOL_TYPES[call.name]), params,
-                        derived_from=list(call.derived_from))
+        spec = TOOL_SPECS[call.name]
+        if spec.operation:
+            params["tool"] = spec.operation
+        return Action(agent_id, ActionType(spec.action_type), params,
+                      derived_from=list(call.derived_from))
+
+    def submit(self, agent_id: str, call: ToolCall) -> tuple[Action, Decision]:
+        action = self._action(agent_id, call)
         return action, self.broker.submit(action)
+
+    def execute(self, agent_id: str, call: ToolCall) -> tuple[Action, Decision, dict | None]:
+        """Return a computed result only after policy and monitor approval.
+
+        Non-transform tools receive an abstract decision and a None result.
+        Malformed arguments raise ValueError before submission. Computation
+        failures are audited as fail-closed denials by the broker.
+        """
+        action = self._action(agent_id, call)
+        effect = perform_transform if call.name in TRANSFORM_TOOLS else None
+        decision, result = self.broker.execute(action, effect)
+        return action, decision, result
 
 
 @dataclass
@@ -66,6 +84,10 @@ class AIAgent:
 
     def run(self, task: str, tools: ToolRegistry) -> list[tuple[Action, Decision]]:
         return [tools.submit(self.agent_id, call)
+                for call in self.model.propose(self.role, task)]
+
+    def run_with_results(self, task: str, tools: ToolRegistry) -> list[tuple[Action, Decision, dict | None]]:
+        return [tools.execute(self.agent_id, call)
                 for call in self.model.propose(self.role, task)]
 
 
