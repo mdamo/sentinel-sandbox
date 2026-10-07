@@ -37,6 +37,16 @@ else
     exit 1
 fi
 
+if [[ -n ${SENTINEL_EXEC_CONFIG:-} ]]; then
+    if ! grep -Fq 'SENTINEL_EXECUTION_BOOT_PASS authentication adapters direct-access-denied' "$log" || \
+       grep -Fq 'SENTINEL_BOOT_TEST_FAIL' "$log"; then
+        cat "$log"
+        echo 'FAIL: authenticated execution or guest isolation checks failed.' >&2
+        exit 1
+    fi
+    echo 'PASS: guest authenticated to trusted adapters; direct-access checks denied.'
+    exit 0
+fi
 if ! grep -Fq 'SENTINEL_BOOT_TEST_PASS' "$log" || \
    grep -Fq 'SENTINEL_BOOT_TEST_FAIL' "$log" || \
    ! grep -Fq 'drop.attacker.example' "$log" || \

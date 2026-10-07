@@ -35,6 +35,10 @@ def default_broker() -> Broker:
     monitor = Monitor(
         Budget(5000, 20, 2), Budget(50000, 100, 3),
         response=ResponsePolicy.strict(),
+        # DNS and sends by different demo roles are an expected workflow,
+        # including across client invocations sharing this broker. Suppress
+        # correlation heuristics only for this host; retain budgets and taint.
+        workflow_hosts=frozenset({"api.internal.svc"}),
         on_alert=lambda a: print(f"[sentinel | host | alert] {a.line()}", flush=True),
     )
     return Broker(policy, monitor)
@@ -55,9 +59,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         try:
+            self.connection.settimeout(5)
             length = int(self.headers.get("Content-Length", 0))
-            if length < 1 or length > 65536:
-                raise ValueError("invalid request size")
+            if not 0 < length <= 65536 or self.headers.get("Transfer-Encoding"):
+                raise ValueError("invalid request size or framing")
             raw = self.rfile.read(length)
             server: SentinelHTTPServer = self.server  # type: ignore[assignment]
             identity = server.identities.authenticate(

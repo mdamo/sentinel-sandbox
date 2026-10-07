@@ -16,6 +16,7 @@ host-owned adapter. Every final decision is appended to the audit log.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import threading
@@ -74,7 +75,7 @@ class AuditLog:
 
     def append(self, action: Action, decision: Decision) -> AuditEntry:
         prev = self._entries[-1].hash if self._entries else GENESIS
-        entry = AuditEntry(action, decision, prev_hash=prev)
+        entry = AuditEntry(copy.deepcopy(action), copy.deepcopy(decision), prev_hash=prev)
         entry.hash = entry.compute_hash()
         self._entries.append(entry)
         return entry
@@ -104,16 +105,22 @@ class Broker:
         self.monitor = monitor
         self.audit = AuditLog()
         self.fail_closed = True
-        self._lock = threading.Lock()
+        # Reentrant: the execution runtime borrows this lock for its own
+        # state transitions while the broker reviews an action.
+        self.lock = threading.RLock()
 
     def submit(self, action: Action) -> Decision:
         return self.execute(action)[0]
 
     def execute(self, action: Action,
                 effect: Callable[[Action], dict] | None = None) -> tuple[Decision, dict | None]:
-        """Serialize review and host effect; audit the final outcome."""
-        with self._lock:
-            return self._execute_locked(action, effect)
+        """Serialize review and host effect; audit the final outcome.
+
+        The action is snapshotted so a caller cannot mutate what was reviewed
+        and audited after the fact.
+        """
+        with self.lock:
+            return self._execute_locked(copy.deepcopy(action), effect)
 
     def _execute_locked(self, action: Action,
                         effect: Callable[[Action], dict] | None) -> tuple[Decision, dict | None]:

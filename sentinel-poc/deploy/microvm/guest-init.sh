@@ -13,13 +13,17 @@ echo '[microVM | guest] booted; configuring read-only guest networking'
 # There is deliberately no default route. The host firewall also blocks every
 # guest packet except HTTP to the sentinel, even if guest networking is changed.
 export BROKER_URL=http://172.16.0.1:8085/submit
-export AGENT_KEY_FILE=/etc/sentinel/agent.key
+export AGENT_KEYS_FILE=/etc/sentinel/agent-keys.json
 export AGENT_RUNTIME='microVM guest'
 export PYTHONDONTWRITEBYTECODE=1
 cd /app
-echo '[agents | microVM guest] launching agent-1 as uid=10002; guest=172.16.0.2; sentinel=172.16.0.1:8085'
+echo '[agents | microVM guest] launching the six-agent roster as uid=10002; guest=172.16.0.2; sentinel=172.16.0.1:8085'
+client=swarm.agent_client
+if [ -f /app/execution.token ]; then
+    client=swarm.execution_boot_client
+fi
 if /usr/bin/setpriv --reuid=10002 --regid=10002 --clear-groups \
-    /usr/bin/python3 -B -m swarm.agent_client; then
+    /usr/bin/python3 -B -m "$client"; then
     echo SENTINEL_BOOT_TEST_PASS
 else
     echo SENTINEL_BOOT_TEST_FAIL
